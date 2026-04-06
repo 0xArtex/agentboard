@@ -45,7 +45,69 @@ const windowShim = {
     },
     on: (channel, handler) => {
       if (_socket) _socket.on(channel, handler)
+      return windowShim.webContents
     },
+    once: (channel, handler) => {
+      if (_socket) _socket.once(channel, handler)
+      return windowShim.webContents
+    },
+    off: (channel, handler) => {
+      if (_socket) _socket.off(channel, handler)
+      return windowShim.webContents
+    },
+    addListener: (channel, handler) => {
+      // 'before-input-event' and other DOM-only electron events — no-op
+      if (channel === 'before-input-event' || channel === 'input-event') return windowShim.webContents
+      if (_socket) _socket.on(channel, handler)
+      return windowShim.webContents
+    },
+    removeListener: (channel, handler) => {
+      if (_socket) _socket.off(channel, handler)
+      return windowShim.webContents
+    },
+    removeAllListeners: (channel) => {
+      if (_socket && channel) _socket.removeAllListeners(channel)
+      return windowShim.webContents
+    },
+    isDestroyed: () => false,
+    isFocused: () => document.hasFocus(),
+    focus: () => window.focus(),
+    blur: () => window.blur(),
+    getZoomFactor: () => 1,
+    setZoomFactor: () => {},
+    openDevTools: () => {},
+    closeDevTools: () => {},
+    reload: () => window.location.reload(),
+    executeJavaScript: () => Promise.resolve(),
+    insertCSS: () => '',
+    capturePage: () => Promise.resolve(nativeImage.createEmpty()),
+    id: 1,
+  },
+  getChildWindows: () => [],
+  getParentWindow: () => null,
+  setParentWindow: () => {},
+  getChildren: () => [],
+  focus: () => window.focus(),
+  blur: () => window.blur(),
+  restore: () => {},
+  isVisible: () => !document.hidden,
+  isMinimized: () => false,
+  isDestroyed: () => false,
+  flashFrame: () => {},
+  setAlwaysOnTop: () => {},
+  isAlwaysOnTop: () => false,
+  setResizable: () => {},
+  isResizable: () => true,
+  setMenuBarVisibility: () => {},
+  setAutoHideMenuBar: () => {},
+  setIgnoreMouseEvents: () => {},
+  setVisibleOnAllWorkspaces: () => {},
+  reload: () => window.location.reload(),
+  loadURL: (url) => { window.location.href = url; return Promise.resolve() },
+  once: (event, handler) => {
+    if (event === 'resize') window.addEventListener('resize', handler, { once: true })
+    if (event === 'focus') window.addEventListener('focus', handler, { once: true })
+    if (event === 'blur') window.addEventListener('blur', handler, { once: true })
   },
   setTitle: (title) => { document.title = title },
   getTitle: () => document.title,
@@ -455,12 +517,32 @@ const fsShim = {
   },
 
   writeFileSync: function(filePath, data, options) {
-    // Fire-and-forget async write
+    const encoding = typeof options === 'string' ? options :
+                     (options && options.encoding) || null
+    let body = data
+    let contentType = 'application/octet-stream'
+    try {
+      if (encoding === 'base64' && typeof data === 'string') {
+        // Decode base64 string → binary bytes
+        const bin = atob(data)
+        const bytes = new Uint8Array(bin.length)
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+        body = bytes
+      } else if (typeof data === 'string') {
+        contentType = 'text/plain'
+      } else if (data && data.buffer instanceof ArrayBuffer) {
+        // Uint8Array / Buffer — pass through
+        body = data
+      }
+    } catch (e) {
+      console.warn('[electron-shim] writeFileSync encode error:', e)
+    }
     fetch(`${API_BASE}/fs/write?path=${encodeURIComponent(filePath)}`, {
       method: 'POST',
-      body: data,
+      headers: { 'Content-Type': contentType },
+      body,
     }).catch(err => console.warn('[electron-shim] writeFileSync async failed:', err))
-    // Also cache locally
+    // Cache locally (store original form for readback)
     preloadedFiles.set(filePath, data)
   },
 

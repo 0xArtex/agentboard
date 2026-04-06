@@ -27,9 +27,10 @@ const SRC_DIR = path.join(REPO_ROOT, 'src');
 const app = express();
 const server = http.createServer(app);
 
-// Socket.io
+// Socket.io (allowEIO3=true so v2 clients can connect)
 const io = new SocketIO(server, {
   cors: { origin: '*', methods: ['GET', 'POST'] },
+  allowEIO3: true,
 });
 const socketHandler = setupSocketHandler(io);
 app.locals.socketHandler = socketHandler;
@@ -83,6 +84,18 @@ app.use('/node_modules', express.static(path.join(REPO_ROOT, 'node_modules')));
 // Also serve web-server/data for project files accessible via /data/
 app.use('/server-data', express.static(DATA_DIR));
 
+// Serve project files directly at /web/projects/<uuid>/* → web-server/data/projects/<uuid>/*
+// Used for image loading via Image() that bypasses the fs shim
+app.use('/web/projects/:uuid', (req, res, next) => {
+  const uuid = req.params.uuid;
+  // Validate UUID format to prevent traversal
+  if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(uuid)) {
+    return res.status(400).send('Invalid project id');
+  }
+  const projectDir = path.join(DATA_DIR, 'projects', uuid);
+  express.static(projectDir, { index: false, fallthrough: true })(req, res, next);
+});
+
 // ── Root route: serve the web app HTML ──
 app.get('/', (req, res) => {
   const htmlPath = path.join(SRC_DIR, 'web-app.html');
@@ -124,29 +137,46 @@ async function ensureDefaultProject() {
       fps: 24,
       defaultBoardTiming: 2000,
     });
-    // Add one blank board
+    // Add one blank board with a pre-existing fill layer (skip migration)
     await store.addBoard(id, {
       dialogue: '',
       action: '',
       notes: '',
+      layers: {
+        fill: {
+          url: '' // filled in below
+        }
+      }
     });
     console.log(`📋 Created default project: ${id}`);
     
-    // Create a blank PNG for the board
+    // Create a blank PNG for the board's fill layer
     const imgDir = store.getImagesDir(id);
     const updatedProject = await store.getProject(id);
     if (updatedProject && updatedProject.project.boards.length > 0) {
-      const boardUrl = updatedProject.project.boards[0].url;
-      const imgPath = path.join(imgDir, boardUrl);
-      // Create a minimal 1x1 transparent PNG if the image doesn't exist
-      if (!await fs.pathExists(imgPath)) {
-        // Minimal valid PNG (1x1 transparent pixel)
-        const minPng = Buffer.from(
-          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVQI12NgAAIABQAB' +
-          'Nl7BcQAAAABJRU5ErkJggg==', 'base64'
-        );
-        await fs.writeFile(imgPath, minPng);
+      const board = updatedProject.project.boards[0];
+      const uid = board.uid;
+      const boardNum = board.number;
+      // fill layer filename format: board-<num>-<uid>-fill.png
+      const fillFilename = `board-${boardNum}-${uid}-fill.png`;
+      // Minimal blank 1920x1080 PNG (but 1x1 transparent works too for bootstrap)
+      const minPng = Buffer.from(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVQI12NgAAIABQAB' +
+        'Nl7BcQAAAABJRU5ErkJggg==', 'base64'
+      );
+      await fs.writeFile(path.join(imgDir, fillFilename), minPng);
+      // Update board.layers.fill.url with the real filename
+      board.layers = board.layers || {};
+      board.layers.fill = { url: fillFilename };
+      // DO NOT create board.url image — that's what triggers migration
+      // Delete board.url so existsSync returns false and migration is skipped
+      // Actually we need board.url for other things, just don't create the file
+      // Also remove the board.url file if it was created
+      if (await fs.pathExists(path.join(imgDir, board.url))) {
+        await fs.remove(path.join(imgDir, board.url));
       }
+      // Save the updated project
+      await store.updateProject(id, { boards: updatedProject.project.boards });
     }
   }
 }

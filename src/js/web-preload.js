@@ -70,7 +70,7 @@ async function fetchBrushes () {
  */
 function connectSocket () {
   const socket = io(window.location.origin, {
-    transports: ['websocket', 'polling'],
+    transports: ['polling', 'websocket'],
     reconnection: true,
     reconnectionDelay: 1000,
     reconnectionAttempts: 10

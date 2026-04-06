@@ -35,15 +35,33 @@ const ALLOWED_BASES = [
 function resolvePath(requestedPath) {
   if (!requestedPath) return null;
 
+  // Helper: ensure resolved is within a safe base dir (no traversal)
+  const safeJoin = (base, rel) => {
+    const resolved = path.resolve(base, '.' + (rel.startsWith('/') ? rel : '/' + rel));
+    if (!resolved.startsWith(base + path.sep) && resolved !== base) return null;
+    return resolved;
+  };
+
+  // /web/projects/<uuid>/... → DATA_DIR/projects/<uuid>/...
+  const projMatch = requestedPath.match(/^\/web\/projects\/([0-9a-fA-F-]{8,})(\/.*)?$/);
+  if (projMatch) {
+    const uuid = projMatch[1];
+    // Validate uuid chars only
+    if (!/^[0-9a-fA-F-]+$/.test(uuid)) return null;
+    const rest = projMatch[2] || '';
+    const base = path.join(DATA_DIR, 'projects', uuid);
+    return safeJoin(base, rest || '/');
+  }
+
   // Map virtual paths
   if (requestedPath.startsWith('/web/userData') || requestedPath.startsWith('/web/appData')) {
-    return path.join(DATA_DIR, requestedPath.replace(/^\/web\/(userData|appData)/, ''));
+    return safeJoin(DATA_DIR, requestedPath.replace(/^\/web\/(userData|appData)/, ''));
   }
   if (requestedPath.startsWith('/web/')) {
-    return path.join(DATA_DIR, requestedPath.replace(/^\/web\//, ''));
+    return safeJoin(DATA_DIR, requestedPath.replace(/^\/web\//, ''));
   }
   if (requestedPath.startsWith('/tmp')) {
-    return path.join(DATA_DIR, 'tmp', requestedPath.replace(/^\/tmp\/?/, ''));
+    return safeJoin(path.join(DATA_DIR, 'tmp'), requestedPath.replace(/^\/tmp\/?/, '/'));
   }
 
   // Relative paths resolve from project data

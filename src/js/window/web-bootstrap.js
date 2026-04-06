@@ -15,45 +15,53 @@ const API_BASE = '/api'
  * Fetch project info from the backend and set up sharedObj
  */
 async function setupSharedObj () {
-  let project = null
+  let projectId = null
+  let projectJson = null
 
-  // Check URL params for a specific project
   const params = new URLSearchParams(window.location.search)
-  const projectId = params.get('project')
+  const urlProjectId = params.get('project')
 
   try {
-    if (projectId) {
-      const res = await window.fetch(`${API_BASE}/projects/${projectId}`)
-      if (res.ok) project = await res.json()
-    }
-
-    if (!project) {
-      // Get first/default project
-      const res = await window.fetch(`${API_BASE}/projects`)
+    if (urlProjectId) {
+      const res = await window.fetch(`${API_BASE}/projects/${urlProjectId}`)
       if (res.ok) {
-        const projects = await res.json()
-        if (Array.isArray(projects) && projects.length > 0) {
-          project = projects[0]
-        }
+        const data = await res.json()
+        projectId = data.id
+        projectJson = data.project
+      }
+    }
+    if (!projectId) {
+      const res = await window.fetch(`${API_BASE}/projects/current`)
+      if (res.ok) {
+        const data = await res.json()
+        projectId = data.id
+        projectJson = data.project
       }
     }
   } catch (err) {
     console.warn('[web-bootstrap] Could not fetch project:', err.message)
   }
 
-  // Build sharedObj matching Electron's shape
   const sharedObj = {
-    projectPath: (project && project.path) || '/web/projects/default',
-    boardFilename: (project && project.boardFilename) || 'default.storyboarder',
     port: parseInt(window.location.port, 10) || 3456,
     enableAnalytics: false,
     prefs: electronShim._cachedPrefs || {},
     enableTooltips: true,
   }
 
-  // If project provides a full board file path, use it
-  if (project && project.boardPath) {
-    sharedObj.boardFilename = project.boardPath
+  if (projectId && projectJson) {
+    const projectPath = `/web/projects/${projectId}`
+    sharedObj.projectPath = projectPath
+    sharedObj.boardPath = projectPath
+    sharedObj.boardFilename = `${projectPath}/project.storyboarder`
+    sharedObj.projectId = projectId
+    sharedObj.projectJson = projectJson
+    // Pre-cache the real project file JSON so readFileSync returns it
+    electronShim._cacheFile(sharedObj.boardFilename, JSON.stringify(projectJson))
+  } else {
+    sharedObj.projectPath = '/web/projects/default'
+    sharedObj.boardPath = '/web/projects/default'
+    sharedObj.boardFilename = '/web/projects/default/default.storyboarder'
   }
 
   window.__sharedObj = sharedObj
@@ -68,47 +76,62 @@ async function prefetchBoardFile (sharedObj) {
   const boardFilename = sharedObj.boardFilename
   if (!boardFilename) return
 
-  try {
-    // Try fetching via project files API
-    const projectId = new URLSearchParams(window.location.search).get('project') || 'current'
-    const res = await window.fetch(
-      `${API_BASE}/projects/${projectId}/files/${encodeURIComponent(boardFilename)}`
-    )
-    if (res.ok) {
-      const text = await res.text()
-      electronShim._cacheFile(boardFilename, text)
-      console.log('[web-bootstrap] Cached board file:', boardFilename)
-      return
+  // If we already have the real project JSON cached from setupSharedObj, use it.
+  // Otherwise fall back to fs API.
+  let projectJson = sharedObj.projectJson
+  if (!projectJson) {
+    try {
+      const res = await window.fetch(
+        `${API_BASE}/fs/read?path=${encodeURIComponent(boardFilename)}`
+      )
+      if (res.ok) {
+        const text = await res.text()
+        electronShim._cacheFile(boardFilename, text)
+        try { projectJson = JSON.parse(text) } catch (e) {}
+        console.log('[web-bootstrap] Cached board file (fs):', boardFilename)
+      }
+    } catch (err) {
+      console.warn('[web-bootstrap] Could not prefetch board file:', err.message)
     }
-  } catch (err) {
-    // fall through
+  } else {
+    console.log('[web-bootstrap] Using pre-cached real project:', boardFilename)
   }
 
-  try {
-    // Fallback: try the fs API
-    const res = await window.fetch(
-      `${API_BASE}/fs/read?path=${encodeURIComponent(boardFilename)}`
-    )
-    if (res.ok) {
-      const text = await res.text()
-      electronShim._cacheFile(boardFilename, text)
-      console.log('[web-bootstrap] Cached board file (fs):', boardFilename)
-      return
-    }
-  } catch (err) {
-    console.warn('[web-bootstrap] Could not prefetch board file:', err.message)
+  if (!projectJson) {
+    // Empty fallback
+    const defaultBoard = JSON.stringify({
+      version: '1.0.0', aspectRatio: 2.333, fps: 24,
+      defaultBoardTiming: 2000, boards: []
+    })
+    electronShim._cacheFile(boardFilename, defaultBoard)
+    return
   }
 
-  // Cache an empty/default board so readFileSync doesn't crash
-  const defaultBoard = JSON.stringify({
-    version: '1.0.0',
-    aspectRatio: 2.333,
-    fps: 24,
-    defaultBoardTiming: 2000,
-    boards: []
-  })
-  electronShim._cacheFile(boardFilename, defaultBoard)
-  console.log('[web-bootstrap] Using default empty board for:', boardFilename)
+  // Pre-fetch referenced board images so readFileSync hits cache
+  const boardPath = sharedObj.boardPath
+  const boards = Array.isArray(projectJson.boards) ? projectJson.boards : []
+  await Promise.all(boards.map(async (board) => {
+    const urls = new Set()
+    if (board.url) urls.add(board.url)
+    if (board.layers) {
+      for (const k of Object.keys(board.layers)) {
+        if (board.layers[k] && board.layers[k].url) urls.add(board.layers[k].url)
+      }
+    }
+    for (const filename of urls) {
+      const filePath = `${boardPath}/images/${filename}`
+      try {
+        const res = await window.fetch(
+          `${API_BASE}/fs/read?path=${encodeURIComponent(filePath)}`
+        )
+        if (res.ok) {
+          const buf = await res.arrayBuffer()
+          const bytes = new Uint8Array(buf)
+          electronShim._cacheFile(filePath, bytes)
+        }
+      } catch (e) { /* missing is fine */ }
+    }
+  }))
 }
 
 /**

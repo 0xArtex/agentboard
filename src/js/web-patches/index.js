@@ -30,6 +30,7 @@ const applyI18nextPatch = require('./i18next-patch')
 
 // Phase 2: Async patches (data fetching)
 const applySketchPanePatch = require('./sketch-pane-patch')
+const applyAlchemancyPatch = require('./alchemancy-patch')
 
 /**
  * Apply all patches. Returns a promise for async patches.
@@ -47,7 +48,10 @@ async function applyAllPatches () {
   
   // Sketch pane patch fetches and caches brushes.json
   await applySketchPanePatch()
-  
+
+  // Alchemancy runtime guards (cursor + pixelsToCanvas)
+  applyAlchemancyPatch()
+
   console.log('[web-patches] All patches applied')
 }
 

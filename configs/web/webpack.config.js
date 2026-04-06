@@ -95,6 +95,8 @@ module.exports = {
       'ffmpeg-static': noopShim,
       'i18next-fs-backend': noopShim,
       'tmp': noopShim,
+      'execa': noopShim,
+      'cross-spawn': noopShim,
 
       // Node network modules used by 'request' library
       'net': noopShim,
