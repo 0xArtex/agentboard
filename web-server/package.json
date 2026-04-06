@@ -1,0 +1,21 @@
+{
+  "name": "storyboarder-web-server",
+  "version": "1.0.0",
+  "description": "Storyboarder Web Backend — Express + Socket.io server replacing Electron main process",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "bash test.sh"
+  },
+  "dependencies": {
+    "archiver": "^6.0.1",
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "fs-extra": "^11.2.0",
+    "morgan": "^1.10.0",
+    "multer": "^1.4.5-lts.1",
+    "socket.io": "^4.7.4",
+    "uuid": "^9.0.0"
+  }
+}

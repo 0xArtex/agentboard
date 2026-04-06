@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Storyboarder Web</title>
+    <link rel="stylesheet" href="./css/fonts.css">
+    <link rel="stylesheet" href="./css/mainwindow.css">
+    <link rel="stylesheet" href="./css/storyboarder-sketch-pane.css">
+    <link rel="stylesheet" href="./css/toolbar.css">
+    <link rel="stylesheet" href="./css/tooltip.css">
+    <link rel="stylesheet" href="./css/keyboard.css">
+    <link rel="stylesheet" href="./css/context-menu.css">
+    <link rel="stylesheet" href="./css/transport.css">
+    <link rel="stylesheet" href="./css/notifications.css">
+    <link rel="stylesheet" href="./css/guides.css">
+    <link rel="stylesheet" href="./css/pomodoro-timer.css">
+    <link rel="stylesheet" href="./css/sts-sidebar.css">
+  </head>
+  <body>
+    <div id="drag-handle"></div>
+    <div id="scenes"></div>
+    <div id="script"></div>
+    <div id="storyboarder-main">
+      <div id="toolbar">
+        <div class="column">
+          <div class="group group_tools">
+            <div id="toolbar-light-pencil" data-group="brushes" class="button" data-tooltip
+              data-tooltip-title="Light Pencil"
+              data-tooltip-description="Draw rough ideas with this tool."
+              data-tooltip-keys="1"
+              data-tooltip-position="bottom center">
+              <div class="icon icon-toolbar-tool icon-toolbar-tool_light-pencil"></div>
+            </div>
+            <div id="toolbar-brush" data-group="brushes" class="button" data-tooltip
+              data-tooltip-title="Fill Brush Pen"
+              data-tooltip-description="Paint and fill with this tool."
+              data-tooltip-keys="2"
+              data-tooltip-position="bottom center">
+              <div class="icon icon-toolbar-tool icon-toolbar-tool_brush"></div>
+            </div>
+            <div id="toolbar-tone" data-group="brushes" class="button" data-tooltip
+              data-tooltip-title="Tone Pastel"
+              data-tooltip-description="Tone and shade with this tool."
+              data-tooltip-keys="3"
+              data-tooltip-position="bottom center">
+              <div class="icon icon-toolbar-tool icon-toolbar-tool_tone"></div>
+            </div>
+            <div id="toolbar-pencil" data-group="brushes" class="button" data-tooltip
+              data-tooltip-title="Pencil"
+              data-tooltip-description="Draw and shade details with this tool."
+              data-tooltip-keys="4"
+              data-tooltip-position="bottom center">
+              <div class="icon icon-toolbar-tool icon-toolbar-tool_pencil"></div>
+            </div>
+            <div id="toolbar-pen" data-group="brushes" class="button" data-tooltip
+              data-tooltip-title="Ink Marker"
+              data-tooltip-description="Hard thicker lines for inking."
+              data-tooltip-keys="5"
+              data-tooltip-position="bottom center">
+              <div class="icon icon-toolbar-tool icon-toolbar-tool_pen"></div>
+            </div>
+            <div id="toolbar-note-pen" data-group="brushes" class="button" data-tooltip
+              data-tooltip-title="Note Pen"
+              data-tooltip-description="Revise boards with this tool."
+              data-tooltip-keys="6"
+              data-tooltip-position="bottom center">
+              <div class="icon icon-toolbar-tool icon-toolbar-tool_note-pen"></div>
+            </div>
+            <div id="toolbar-eraser" data-group="brushes" class="button" data-tooltip
+              data-tooltip-title="Eraser"
+              data-tooltip-description="Erase mistakes."
+              data-tooltip-keys="7|Option"
+              data-tooltip-position="bottom center">
+              <div class="icon icon-toolbar-tool icon-toolbar-tool_eraser"></div>
+            </div>
+          </div>
+        </div>
+        <div class="column">
+          <div class="group group_colors">
+            <div class="toolbar-colors">
+              <div class="toolbar-colors_column">
+                <div id="toolbar-current-color" class="button">
+                  <div class="icon icon-toolbar-color_current"></div>
+                </div>
+                <div class="toolbar-brush-modifier-controls">
+                  <div class="toolbar-brush-modifier-controls_size"></div>
+                  <div class="toolbar-brush-modifier-controls_stroke-opacity"></div>
+                </div>
+              </div>
+              <div class="toolbar-colors_column">
+                <div id="toolbar-palette-colorA" class="button">
+                  <div class="icon icon-toolbar-color_palette"></div>
+                </div>
+                <div id="toolbar-palette-colorB" class="button">
+                  <div class="icon icon-toolbar-color_palette"></div>
+                </div>
+                <div id="toolbar-palette-colorC" class="button">
+                  <div class="icon icon-toolbar-color_palette"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="group">
+            <div id="toolbar-trash" class="button">
+              <svg class="icon"><use xlink:href="./img/symbol-defs.svg#icon-trash"></use></svg>
+            </div>
+            <div id="toolbar-move" class="button">
+              <svg class="icon"><use xlink:href="./img/symbol-defs.svg#icon-move"></use></svg>
+            </div>
+            <div id="toolbar-scale" class="button">
+              <svg class="icon"><use xlink:href="./img/symbol-defs.svg#icon-scale"></use></svg>
+            </div>
+            <div id="toolbar-marquee" class="button">
+              <svg class="icon"><use xlink:href="./img/symbol-defs.svg#icon-marquee"></use></svg>
+            </div>
+          </div>
+          <div class="group group_undo_redo">
+            <div id="toolbar-undo" class="button">
+              <svg class="icon"><use xlink:href="./img/symbol-defs.svg#icon-undo"></use></svg>
+            </div>
+            <div id="toolbar-redo" class="button">
+              <svg class="icon"><use xlink:href="./img/symbol-defs.svg#icon-redo"></use></svg>
+            </div>
+          </div>
+          <div class="group">
+            <div id="toolbar-grid" class="button">
+              <svg class="icon"><use xlink:href="./img/symbol-defs.svg#icon-grid"></use></svg>
+            </div>
+            <div id="toolbar-center" class="button">
+              <svg class="icon"><use xlink:href="./img/symbol-defs.svg#icon-center"></use></svg>
+            </div>
+            <div id="toolbar-thirds" class="button">
+              <svg class="icon"><use xlink:href="./img/symbol-defs.svg#icon-thirds"></use></svg>
+            </div>
+            <div id="toolbar-onion" class="button">
+              <svg class="icon"><use xlink:href="./img/symbol-defs.svg#icon-onion"></use></svg>
+            </div>
+            <div id="toolbar-captions" class="button">
+              <svg class="icon"><use xlink:href="./img/symbol-defs.svg#icon-caption"></use></svg>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div id="sketch-body">
+        <div id="storyboarder-sketch-pane"></div>
+        <div id="board-metadata">
+          <div class="board-metadata-container">
+            <div class="number"><svg class="smallicon"><use xlink:href="./img/symbol-defs.svg#icon-board"></use></svg><span id="shot"></span></div>
+            <div class="row" id="board-numbers">12 of 76</div>
+            <div class="row" id="line-mileage">
+              <svg class="smallericon"><use xlink:href="./img/symbol-defs.svg#icon-linemileage"></use></svg><span id="line-miles"></span>
+            </div>
+            <div class="hardrule"></div>
+            <div class="row" id="shot-generator-container"></div>
+            <div class="hardrule"></div>
+            <div class="row" id="new-shot">
+              <input type="checkbox" name="newShot" id="newShot" /><label for="newShot" id="new-shot-label"><span></span>New Shot?</label>
+            </div>
+            <div class="row">
+              <div id="duration"><svg class="smallicon"><use xlink:href="./img/symbol-defs.svg#icon-duration"></use></svg>Duration</div>
+              <div class="row">
+                <div class="col"><input type="text" name="duration" placeholder="ms" id="duration-ms"></div>
+                <div class="col"><input type="text" name="frames" placeholder="frames" id="duration-fps"></div>
+              </div>
+            </div>
+            <div class="row">
+              <div><svg class="smallicon"><use xlink:href="./img/symbol-defs.svg#icon-dialogue"></use></svg><span id="dialog-title">Dialogue</span> <span id="suggested-dialogue-duration"></span></div>
+              <textarea name="dialogue" id="dialogue-tooltip"></textarea>
+            </div>
+            <div class="row">
+              <div><svg class="smallicon"><use xlink:href="./img/symbol-defs.svg#icon-action"></use></svg><span id="action-title">Action</span></div>
+              <textarea name="action" id="action-tooltip"></textarea>
+            </div>
+            <div class="row">
+              <div class="inline"><svg class="smallicon"><use xlink:href="./img/symbol-defs.svg#icon-notes"></use></svg><span id="note-title">Notes</span></div>
+              <div class="layers-ui-notes-clear flatbutton small"><svg class="smallericon"><use xlink:href="./img/symbol-defs.svg#icon-trash"></use></svg><span id="clear-note-title">Clear Notes Layer</span></div>
+              <textarea name="notes" id="note-tooltip"></textarea>
+            </div>
+            <div class="row">
+              <div class="audiofile_container">
+                <div class="recording_container">
+                  <div class="record_button"><div class="flatbutton"><div class="record_icon"><span style="color: red; font-weight: bold">R</span></div></div></div>
+                  <div class="record_visualization"><canvas></canvas></div>
+                </div>
+                <div class="audiofile_button">
+                  <div class="flatbutton">
+                    <div class="audiofile_icon"><svg class="smallicon"><use xlink:href="./img/symbol-defs.svg#icon-speaker-on"></use></svg></div>
+                    <span class="audiofile_text"><span class="paren">(</span><a>no audio</a><span class="paren">)</span></span>
+                  </div>
+                </div>
+                <div class="audiofile_clear">
+                  <div class="flatbutton"><svg class="smallicon"><use xlink:href="./img/symbol-defs.svg#icon-trash"></use></svg></div>
+                </div>
+                <input hidden="true" type="text" name="audiofile" id="audiofile" />
+              </div>
+            </div>
+            <div class="hardrule"></div>
+            <div class="row">
+              <div class="inline"><svg class="smallicon"><use xlink:href="./img/symbol-defs.svg#icon-lightbox"></use></svg><span id="reference-layer-title">Reference Layer</span></div>
+              <div class="layers-ui-reference-clear flatbutton small"><svg class="smallericon"><use xlink:href="./img/symbol-defs.svg#icon-trash"></use></svg><span id="clear-title">Clear</span></div>
+              <div>
+                <div class="col">
+                  <div class="layers-ui-fill-merge flatbutton"><svg class="smallicon"><use xlink:href="./img/symbol-defs.svg#icon-mergedown"></use></svg><span id="merge-down-title">Merge Down</span></div>
+                </div>
+                <div class="col">
+                  <div class="layers-ui-reference-merge flatbutton"><svg class="smallicon"><use xlink:href="./img/symbol-defs.svg#icon-mergeup"></use></svg><span id="merge-up-title">Merge Up</span></div>
+                </div>
+              </div>
+              <div>
+                <input class="layers-ui-reference-opacity" type="range" min="0" max="100" step="25" value="100">
+              </div>
+            </div>
+            <div class="hardrule"></div>
+            <div class="row sidebar-scene-settings">
+              <div style="margin-bottom:0.5rem" id="scene">Scene</div>
+              <div class="row">
+                <div class="col"><label style="color: #777" id="frame-rate">Frame Rate </label></div>
+                <div class="col">
+                  <select class="sidebar-scene-settings_fps">
+                    <option value="12">12</option>
+                    <option value="15">15</option>
+                    <option value="24">24</option>
+                    <option value="23.976">23.98 (23.976)</option>
+                    <option value="25">25</option>
+                    <option value="29.97">29.97</option>
+                    <option value="30">30</option>
+                    <option value="50">50</option>
+                    <option value="59.94">59.94</option>
+                    <option value="60">60</option>
+                  </select>
+                  <span style="color: #777; margin-left: 0.25rem">fps</span>
+                </div>
+              </div>
+            </div>
+            <div class="hardrule"></div>
+            <div class="row">
+              <div class="flatbutton" id="show-in-finder-button"><svg class="smallicon"><use xlink:href="./img/symbol-defs.svg#icon-showfile"></use></svg><span id="show-in-finder-title">Show in Folder</span></div>
+            </div>
+          </div>
+          <svg class="scroll-indicator">
+            <use xlink:href="./img/symbol-defs.svg#icon-small-down-arrow"></use>
+          </svg>
+        </div>
+      </div>
+      <div id="thumbnail-container">
+        <div id="thumbnail-drawer"></div>
+        <div id="thumbnail-cursor" style="display: none"></div>
+      </div>
+      <div id="scene-timeline-container"></div>
+      <div id="timeline">
+        <div class="left-block"></div>
+        <div id="movie-timeline-content"></div>
+        <div class="right-block"></div>
+      </div>
+      <div id="playback">
+        <div id="left-stats">
+          <div class="stats-primary"></div>
+          <div class="stats-secondary"></div>
+        </div>
+        <div id="timeline-mode-control-view"></div>
+        <div id="icons">
+          <div class="transport-control transport-control-prev-scene" data-action="previousScene">
+            <svg aria-hidden="true"><use xlink:href="./img/button-prevscene.svg#Layer_6"></use></svg>
+          </div>
+          <div class="transport-control transport-control-prev-board" data-action="prevBoard">
+            <svg aria-hidden="true"><use xlink:href="./img/button-prev.svg#Layer_2"></use></svg>
+          </div>
+          <div class="transport-control transport-control-play" data-action="togglePlayback">
+            <svg aria-hidden="true"><use xlink:href="./img/button-play-pause.svg#icon-play"></use></svg>
+          </div>
+          <div class="transport-control transport-control-next-board" data-action="nextBoard">
+            <svg aria-hidden="true"><use xlink:href="./img/button-next.svg#Layer_3"></use></svg>
+          </div>
+          <div class="transport-control transport-control-next-scene" data-action="nextScene">
+            <svg aria-hidden="true"><use xlink:href="./img/button-nextscene.svg#Layer_5"></use></svg>
+          </div>
+        </div>
+        <div id="right-stats">
+          <div class="stats-primary"><br /></div>
+          <div class="stats-secondary"><br /></div>
+        </div>
+      </div>
+    </div>
+    <div id="notifications" class="notifications"></div>
+    <!-- Webpack bundle -->
+    <script src="./build/web-app.js"></script>
+  </body>
+</html>
