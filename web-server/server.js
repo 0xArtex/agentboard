@@ -73,6 +73,10 @@ app.use(express.static(SRC_DIR, {
   index: false,
 }));
 
+// Also serve src/ under /src/ for webpack's __dirname-based paths
+// (e.g. path.join('/src/js/window', '..', '..', 'data', 'brushes') = '/src/data/brushes')
+app.use('/src', express.static(SRC_DIR, { index: false }));
+
 // Serve node_modules that the HTML might reference (e.g. socket.io-client)
 app.use('/node_modules', express.static(path.join(REPO_ROOT, 'node_modules')));
 

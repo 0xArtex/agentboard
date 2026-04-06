@@ -198,14 +198,17 @@ async function bootstrap () {
   // 3. Pre-fetch the board file (readFileSync needs it)
   await prefetchBoardFile(sharedObj)
 
-  // Set up global __dirname for shot-generator and other modules that use window.__dirname
-  // In Electron, this points to the app root. In web, we use '' so paths resolve relative to origin.
+  // Set up global __dirname for modules that use window.__dirname or __dirname at load time.
+  // In Electron, this points to the file's directory. We use '/src/js/window' which is where
+  // main-window.js lives — then relative paths like '../../data/brushes' resolve to '/src/data/brushes',
+  // which the backend serves as static files.
   if (typeof window.__dirname === 'undefined') {
-    window.__dirname = ''
+    // path.join('/js/window', '..', '..', 'data', 'brushes') = '/data/brushes'
+    // which the server serves from src/data/brushes/
+    window.__dirname = '/js/window'
   }
-  // Also set global __filename for any code that uses it
   if (typeof window.__filename === 'undefined') {
-    window.__filename = '/index.html'
+    window.__filename = '/js/window/main-window.js'
   }
 
   console.log('[web-bootstrap] Bootstrap complete, loading main-window...')

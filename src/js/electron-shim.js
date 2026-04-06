@@ -771,6 +771,29 @@ const app = remote.app
 //   const fse = require('fs-extra')
 // ============================================================
 
+// webFrame shim — used for zoom control (Electron's renderer-only API)
+const webFrame = {
+  setZoomFactor: (factor) => {
+    if (document && document.body) {
+      document.body.style.zoom = factor
+    }
+  },
+  getZoomFactor: () => {
+    return parseFloat(document?.body?.style?.zoom) || 1
+  },
+  setZoomLevel: () => {},
+  getZoomLevel: () => 0,
+  setVisualZoomLevelLimits: () => {},
+  setLayoutZoomLevelLimits: () => {},
+  registerURLSchemeAsSecure: () => {},
+  registerURLSchemeAsBypassingCSP: () => {},
+  registerURLSchemeAsPrivileged: () => {},
+  insertCSS: () => {},
+  executeJavaScript: () => Promise.resolve(),
+  on: () => {},
+  removeListener: () => {},
+}
+
 // For require('electron')
 module.exports = {
   ipcRenderer,
@@ -781,6 +804,7 @@ module.exports = {
   dialog: dialogShim,
   app,
   BrowserWindow,
+  webFrame,
   screen: remote.screen,
   Menu: remote.Menu,
   MenuItem: remote.MenuItem,

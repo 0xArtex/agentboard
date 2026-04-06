@@ -16,6 +16,36 @@
 const electronShim = require('../electron-shim')
 
 module.exports = async function applySketchPanePatch () {
+  // PIXI in the browser may fail to load images without CORS credentials or
+  // when the image URL uses backslashes or odd resolution. Pre-set the global
+  // PIXI crossOrigin to anonymous, and install a global Image loader override
+  // that normalizes brush paths to absolute URLs.
+  try {
+    // Override Image constructor hooks so PIXI's BaseTexture.fromImage works
+    // Actually, the simplest fix: pre-load brush PNGs into Image cache so
+    // when PIXI creates a new Image() with the same src, the browser serves
+    // from memory and fires 'load' even without CORS.
+    const brushNames = [
+      'brushefficiency', 'brushhard', 'brushmediumoval', 'brushmediumovalhollow',
+      'brushsoft', 'graincanvas', 'grainpaper2', 'grainpaper4', 'hardwood', 'teardrop'
+    ]
+    await Promise.all(brushNames.map(name => {
+      return new Promise((resolve) => {
+        const img = new Image()
+        img.crossOrigin = 'anonymous'
+        // Warm the cache at multiple paths that might be used
+        img.onload = img.onerror = resolve
+        img.src = '/data/brushes/' + name + '.png'
+        // Keep a global reference so it isn't GC'd
+        window.__brushImageCache = window.__brushImageCache || []
+        window.__brushImageCache.push(img)
+      })
+    }))
+    console.log('[web-patches/sketch-pane] Pre-loaded', brushNames.length, 'brush images')
+  } catch (err) {
+    console.warn('[web-patches/sketch-pane] brush image preload failed:', err.message)
+  }
+
   // Pre-fetch brushes.json and cache it under multiple possible paths
   // so readFileSync can find it regardless of how __dirname resolves
   try {
