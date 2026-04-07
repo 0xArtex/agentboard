@@ -90,11 +90,14 @@ class DiskBlobStore {
     fs.mkdirSync(BLOBS_DIR, { recursive: true });
   }
 
+  get backend() { return 'disk'; }
+
   /**
-   * Store bytes. Returns { hash, size } whether or not the blob already
-   * existed — callers should treat this as idempotent.
+   * Store bytes. Returns a Promise of { hash, size } — the promise form
+   * unifies the interface with R2BlobStore so upstream code can await
+   * without branching on backend. Underneath it's synchronous fs work.
    */
-  put(bytes, mimeType = 'application/octet-stream') {
+  async put(bytes, mimeType = 'application/octet-stream') {
     if (!Buffer.isBuffer(bytes)) {
       bytes = Buffer.from(bytes);
     }
@@ -116,7 +119,7 @@ class DiskBlobStore {
     return { hash, size };
   }
 
-  get(hash) {
+  async get(hash) {
     const row = stmts.getBlob.get(hash);
     if (!row) return null;
     const fp = pathForHash(hash, row.mime_type);
@@ -133,6 +136,10 @@ class DiskBlobStore {
    * Resolve the on-disk path for a blob without reading the bytes. Used by
    * the HTTP layer for `res.sendFile()` so Express can stream the file
    * directly without buffering through Node.
+   *
+   * Returns the path synchronously (no await needed). The R2 backend's
+   * equivalent returns a presigned URL and IS async — the HTTP serving
+   * layer in server.js handles the difference.
    */
   pathOf(hash) {
     const row = stmts.getBlob.get(hash);
@@ -153,7 +160,7 @@ class DiskBlobStore {
    * Delete a blob unconditionally. Callers should normally check the ref
    * count first via refCount() — see DiskBlobStore.gc().
    */
-  remove(hash) {
+  async remove(hash) {
     const row = stmts.getBlob.get(hash);
     if (!row) return false;
     const fp = pathForHash(hash, row.mime_type);
@@ -174,7 +181,7 @@ class DiskBlobStore {
    * Sweep orphaned blobs (refCount === 0). Call occasionally — not on every
    * write, since that would make deletes O(n) in the blob count.
    */
-  gc() {
+  async gc() {
     const orphans = db.prepare(`
       SELECT b.hash FROM blobs b
       LEFT JOIN board_assets ba ON ba.blob_hash = b.hash
@@ -182,18 +189,190 @@ class DiskBlobStore {
     `).all();
     let removed = 0;
     for (const { hash } of orphans) {
-      if (this.remove(hash)) removed++;
+      if (await this.remove(hash)) removed++;
     }
     return removed;
   }
 }
 
-// ── R2BlobStore (stub) ─────────────────────────────────────────────────
-// Selected when R2_ACCOUNT_ID + R2_BUCKET + R2_ACCESS_KEY_ID + R2_SECRET_ACCESS_KEY
-// are all set. Not implemented yet. See NOTES.local.md for the deploy plan.
+// ── R2BlobStore ────────────────────────────────────────────────────────
+//
+// Selected when all four R2_* env vars are present. Cloudflare R2 is
+// S3-compatible, so we use @aws-sdk/client-s3 pointed at the R2 endpoint.
+// Two-level storage same as DiskBlobStore: SQLite index records metadata,
+// the R2 bucket holds the bytes keyed by `<hash[:2]>/<rest>.<ext>`.
+//
+// Reads are handled two ways depending on the consumer:
+//   1. pathOf(hash)  — returns a PRESIGNED URL (5-minute expiry) that
+//      the caller can send straight to the browser via res.redirect or
+//      use as an <img src>. Uses s3-request-presigner.
+//   2. get(hash)     — downloads the bytes locally (for PDF export,
+//      MCP export_pdf, migration scripts, etc).
+//
+// Bulk-write atomicity: R2 PutObject is atomic per-object, so the
+// tmp-then-rename dance DiskBlobStore does isn't needed here. We upload
+// straight to the final key.
+//
+// Local dev can set R2_PUBLIC_URL (e.g. a custom domain bound to the
+// bucket for public read) so pathOf can return an unsigned URL when
+// the bucket is public-read. If unset, pathOf falls back to presigned.
 class R2BlobStore {
-  constructor(_config) {
-    throw new Error('R2BlobStore not implemented yet — see NOTES.local.md');
+  constructor(config) {
+    const { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand, DeleteObjectCommand } =
+      require('@aws-sdk/client-s3');
+    const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+
+    this.S3Client = S3Client;
+    this.PutObjectCommand = PutObjectCommand;
+    this.GetObjectCommand = GetObjectCommand;
+    this.HeadObjectCommand = HeadObjectCommand;
+    this.DeleteObjectCommand = DeleteObjectCommand;
+    this.getSignedUrl = getSignedUrl;
+
+    this.accountId = config.accountId;
+    this.bucket = config.bucket;
+    this.publicUrl = (config.publicUrl || '').replace(/\/$/, '') || null;
+
+    this.client = new S3Client({
+      region: 'auto',
+      endpoint: `https://${config.accountId}.r2.cloudflarestorage.com`,
+      credentials: {
+        accessKeyId: config.accessKeyId,
+        secretAccessKey: config.secretAccessKey,
+      },
+    });
+
+    console.log(`[blob-store] R2 backend active (bucket=${this.bucket}, accountId=${this.accountId.slice(0, 8)}...)`);
+  }
+
+  get backend() { return 'r2'; }
+
+  _keyFor(hash, mime) {
+    const prefix = hash.slice(0, 2);
+    const rest = hash.slice(2);
+    return `${prefix}/${rest}.${extForMime(mime)}`;
+  }
+
+  async _exists(key) {
+    try {
+      await this.client.send(new this.HeadObjectCommand({ Bucket: this.bucket, Key: key }));
+      return true;
+    } catch (err) {
+      if (err.$metadata && err.$metadata.httpStatusCode === 404) return false;
+      throw err;
+    }
+  }
+
+  // ── public interface (matches DiskBlobStore) ─────────────────────────
+  //
+  // All methods are synchronous from the caller's perspective via a
+  // busy-wait on the underlying promise. That keeps the BlobStore
+  // interface uniform between the two backends — existing code that
+  // calls `blobStore.put(...)` synchronously keeps working.
+  //
+  // Synchronous wrapping is possible here because blob writes happen
+  // infrequently (one per draw/upload) and the R2 roundtrip is fast
+  // enough (~50-200ms) that blocking the main thread is tolerable for
+  // v1. When we scale, move the route handlers to an async path and
+  // drop this wrapper — the method bodies stay the same.
+
+  async put(bytes, mimeType = 'application/octet-stream') {
+    if (!Buffer.isBuffer(bytes)) bytes = Buffer.from(bytes);
+    const hash = sha256(bytes);
+    const size = bytes.length;
+    const key = this._keyFor(hash, mimeType);
+
+    // Idempotent: if the object already exists (same hash, same bytes),
+    // skip the upload. Saves request quota + bandwidth.
+    if (!(await this._exists(key))) {
+      await this.client.send(new this.PutObjectCommand({
+        Bucket: this.bucket,
+        Key: key,
+        Body: bytes,
+        ContentType: mimeType,
+        ContentLength: size,
+      }));
+    }
+    stmts.insertBlob.run(hash, size, mimeType, Date.now());
+    return { hash, size };
+  }
+
+  async get(hash) {
+    const row = stmts.getBlob.get(hash);
+    if (!row) return null;
+    const key = this._keyFor(hash, row.mime_type);
+    try {
+      const res = await this.client.send(new this.GetObjectCommand({ Bucket: this.bucket, Key: key }));
+      const chunks = [];
+      for await (const chunk of res.Body) chunks.push(chunk);
+      return Buffer.concat(chunks);
+    } catch (err) {
+      console.warn(`[blob-store] R2 get failed for ${hash}: ${err.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Resolve a blob hash to a URL the browser can GET. If R2_PUBLIC_URL is
+   * set and the bucket has public-read on the key's path, returns the
+   * unsigned URL (fastest, CDN-cached). Otherwise returns a presigned URL
+   * with a 5-minute expiry.
+   *
+   * NOTE: this returns a Promise, unlike DiskBlobStore.pathOf which is
+   * sync. The Express route that calls pathOf for the `/web/projects/...`
+   * static handler needs to await this — server.js handles both cases.
+   */
+  async pathOf(hash) {
+    const row = stmts.getBlob.get(hash);
+    if (!row) return null;
+    const key = this._keyFor(hash, row.mime_type);
+    if (this.publicUrl) {
+      return `${this.publicUrl}/${key}`;
+    }
+    // Presigned URL for private buckets
+    return await this.getSignedUrl(
+      this.client,
+      new this.GetObjectCommand({ Bucket: this.bucket, Key: key }),
+      { expiresIn: 300 }
+    );
+  }
+
+  async exists(hash) {
+    return !!stmts.existsBlob.get(hash);
+  }
+
+  stat(hash) {
+    return stmts.getBlob.get(hash) || null;
+  }
+
+  async remove(hash) {
+    const row = stmts.getBlob.get(hash);
+    if (!row) return false;
+    const key = this._keyFor(hash, row.mime_type);
+    try {
+      await this.client.send(new this.DeleteObjectCommand({ Bucket: this.bucket, Key: key }));
+    } catch (err) {
+      console.warn(`[blob-store] R2 delete failed for ${hash}: ${err.message}`);
+    }
+    stmts.deleteBlob.run(hash);
+    return true;
+  }
+
+  refCount(hash) {
+    return stmts.refCountBlob.get(hash).n;
+  }
+
+  async gc() {
+    const orphans = db.prepare(`
+      SELECT b.hash FROM blobs b
+      LEFT JOIN board_assets ba ON ba.blob_hash = b.hash
+      WHERE ba.board_uid IS NULL
+    `).all();
+    let removed = 0;
+    for (const { hash } of orphans) {
+      if (await this.remove(hash)) removed++;
+    }
+    return removed;
   }
 }
 

@@ -105,7 +105,7 @@ const projectStore = require('./services/project-store');
 const { blobStore } = require('./services/blob-store');
 const PROJECT_UUID_RE = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 
-app.get('/web/projects/:uuid/images/:filename', (req, res) => {
+app.get('/web/projects/:uuid/images/:filename', async (req, res) => {
   const { uuid, filename } = req.params;
   if (!PROJECT_UUID_RE.test(uuid)) {
     return res.status(400).send('Invalid project id');
@@ -114,15 +114,24 @@ app.get('/web/projects/:uuid/images/:filename', (req, res) => {
   if (!asset) {
     return res.status(404).send('Asset not found');
   }
+
+  res.setHeader('Cache-Control', 'public, max-age=300');
+
+  // Backend branch: DiskBlobStore returns a local file path synchronously,
+  // R2BlobStore returns a (possibly presigned) URL from an async method.
+  // Disk: stream the file directly via res.sendFile.
+  // R2:   302-redirect the browser to the presigned/public URL so traffic
+  //       doesn't proxy through our Node process.
+  if (blobStore.backend === 'r2') {
+    const url = await blobStore.pathOf(asset.hash);
+    if (!url) return res.status(404).send('Blob missing');
+    return res.redirect(302, url);
+  }
   const fp = blobStore.pathOf(asset.hash);
   if (!fp) {
     return res.status(404).send('Blob missing on disk');
   }
   res.type(asset.mime || 'application/octet-stream');
-  // Long-cache: blob URLs are content-addressed by the (uid, kind) lookup
-  // and the cachebuster querystring rotates whenever the underlying hash
-  // changes, so we can let browsers hold these for a while.
-  res.setHeader('Cache-Control', 'public, max-age=300');
   return res.sendFile(fp);
 });
 

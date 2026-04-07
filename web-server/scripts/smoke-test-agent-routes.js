@@ -181,13 +181,11 @@ const server = app.listen(0, async () => {
       b1Final && b1Final.dialogue === 'UPDATED: she enters the room');
     check('b1 has ink layer', !!(b1Final && b1Final.layers && b1Final.layers.ink));
 
-    // 13-15. stub endpoints return 501
-    r = await req('POST', '/api/agent/generate-image', { prompt: 'x' });
-    check('generate-image stub 501', r.status === 501);
-    r = await req('POST', '/api/agent/generate-speech', { text: 'x' });
-    check('generate-speech stub 501', r.status === 501);
-    r = await req('POST', '/api/agent/export/pdf', { projectId });
-    check('export/pdf stub 501', r.status === 501);
+    // 13-15. Those endpoints (generate-image, generate-speech, export/pdf)
+    // are now fully implemented in their respective tasks #33/#36/#37 and
+    // have dedicated smoke tests (smoke-test-pdf-export.js,
+    // smoke-test-image-gen.js, smoke-test-tts.js). We skip them here so
+    // this test stays scoped to the core Layer 1 routes.
 
     // 16. bad request: missing projectId on add-board
     r = await req('POST', '/api/agent/add-board', { dialogue: 'nope' });

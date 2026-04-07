@@ -44,29 +44,42 @@ function projectTitle(project) {
 }
 
 /**
- * Resolve the on-disk paths for every layer blob a board references.
- * Returns an array of { name, path } in composition order (bottom first).
- * Layers whose blob is missing on disk are silently skipped.
+ * Resolve the image source for every layer blob a board references.
+ * Returns an array of { name, source, opacity } in composition order
+ * (bottom first). `source` is a string path for the disk backend or a
+ * Buffer of the raw bytes for the R2 backend — pdfkit accepts both.
+ *
+ * Layers whose blob is missing are silently skipped.
  */
-function resolveLayerPaths(projectId, board) {
+async function resolveLayerSources(projectId, board) {
   const layers = board.layers || {};
   const result = [];
   const known = new Set(LAYER_ORDER);
 
-  const push = (name) => {
+  const push = async (name) => {
     const layer = layers[name];
     if (!layer || !layer.url) return;
     // layer.url is the synthesized legacy filename (board-N-UID-<name>.png)
     const asset = store.resolveLegacyAsset(projectId, layer.url);
     if (!asset) return;
-    const fp = blobStore.pathOf(asset.hash);
-    if (!fp) return;
-    result.push({ name, path: fp, opacity: typeof layer.opacity === 'number' ? layer.opacity : 1 });
+    let source;
+    if (blobStore.backend === 'r2') {
+      source = await blobStore.get(asset.hash);
+      if (!source) return;
+    } else {
+      source = blobStore.pathOf(asset.hash);
+      if (!source) return;
+    }
+    result.push({
+      name,
+      source,
+      opacity: typeof layer.opacity === 'number' ? layer.opacity : 1,
+    });
   };
 
-  for (const name of LAYER_ORDER) push(name);
+  for (const name of LAYER_ORDER) await push(name);
   for (const name of Object.keys(layers)) {
-    if (!known.has(name)) push(name);
+    if (!known.has(name)) await push(name);
   }
   return result;
 }
@@ -83,6 +96,15 @@ async function renderProjectPdf(projectId) {
   const project = result.project;
   const title = projectTitle(project);
   const boards = project.boards || [];
+
+  // Pre-resolve all layer sources before starting the PDF stream. This is
+  // especially important for the R2 backend where each resolveLayerSources
+  // call does an async download — pdfkit's stream write API isn't async,
+  // so we can't await mid-render.
+  const boardSources = [];
+  for (const board of boards) {
+    boardSources.push(await resolveLayerSources(projectId, board));
+  }
 
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({
@@ -117,12 +139,12 @@ async function renderProjectPdf(projectId) {
 
     boards.forEach((board, index) => {
       renderBoardPage(doc, {
-        projectId,
         project,
         board,
         boardIndex: index,
         boardTotal: boards.length,
         title,
+        layerSources: boardSources[index],
       });
     });
 
@@ -130,7 +152,7 @@ async function renderProjectPdf(projectId) {
   });
 }
 
-function renderBoardPage(doc, { projectId, project, board, boardIndex, boardTotal, title }) {
+function renderBoardPage(doc, { project, board, boardIndex, boardTotal, title, layerSources }) {
   doc.addPage();
 
   const pageW = doc.page.width;
@@ -176,9 +198,8 @@ function renderBoardPage(doc, { projectId, project, board, boardIndex, boardTota
   doc.rect(imgX, imgY, imgW, imgH).fill('#ffffff');
   doc.restore();
 
-  // Composite layers
-  const layerPaths = resolveLayerPaths(projectId, board);
-  if (layerPaths.length === 0) {
+  // Composite layers (sources were pre-resolved async in renderProjectPdf)
+  if (!layerSources || layerSources.length === 0) {
     // Placeholder
     doc.save();
     doc.rect(imgX, imgY, imgW, imgH).fillAndStroke('#f2f2f2', '#ccc');
@@ -186,13 +207,14 @@ function renderBoardPage(doc, { projectId, project, board, boardIndex, boardTota
        .text('(no image)', imgX, imgY + imgH / 2 - 5, { width: imgW, align: 'center' });
     doc.restore();
   } else {
-    for (const layer of layerPaths) {
+    for (const layer of layerSources) {
       try {
-        // pdfkit doesn't expose per-image opacity directly; wrap in a save/restore
-        // and set fillOpacity which applies to images too in pdfkit's raster path.
+        // pdfkit accepts either a file path OR a Buffer here. Disk backend
+        // gives us a path; R2 backend gives us a Buffer of the downloaded
+        // bytes. Same call site for both.
         doc.save();
         if (layer.opacity !== 1) doc.opacity(layer.opacity);
-        doc.image(layer.path, imgX, imgY, { fit: [imgW, imgH], align: 'center', valign: 'center' });
+        doc.image(layer.source, imgX, imgY, { fit: [imgW, imgH], align: 'center', valign: 'center' });
         doc.restore();
       } catch (err) {
         // Non-fatal: one broken image just gets skipped, the others still render

@@ -139,6 +139,11 @@ router.get('/read', asyncHandler(async (req, res) => {
     if (!asset) {
       return res.status(404).json({ error: { message: 'Asset not found' } });
     }
+    if (blobStore.backend === 'r2') {
+      const url = await blobStore.pathOf(asset.hash);
+      if (!url) return res.status(404).json({ error: { message: 'Blob missing' } });
+      return res.redirect(302, url);
+    }
     const fp = blobStore.pathOf(asset.hash);
     if (!fp) {
       return res.status(404).json({ error: { message: 'Blob missing on disk' } });
@@ -204,7 +209,7 @@ router.post('/write', asyncHandler(async (req, res) => {
       return res.status(400).json({ error: { message: 'Project images must be sent as a non-empty binary body' } });
     }
     try {
-      const result = store.storeLegacyAsset(cls.projectId, cls.filename, req.body);
+      const result = await store.storeLegacyAsset(cls.projectId, cls.filename, req.body);
       return res.json({
         ok: true,
         path: req.query.path,

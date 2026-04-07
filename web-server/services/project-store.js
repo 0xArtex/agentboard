@@ -458,7 +458,7 @@ async function addBoard(projectId, data = {}) {
   // true on first load and avoids the placeholder branch entirely.
   const dim = dimensionsForAspect(project.aspect_ratio);
   const blank = blankPng(dim.width, dim.height);
-  const blankResult = blobStore.put(blank, 'image/png');
+  const blankResult = await blobStore.put(blank, 'image/png');
 
   // Always seed the composited board image. Other code paths look for it.
   stmts.upsertAsset.run(uid, 'board', blankResult.hash, null, now);
@@ -877,8 +877,11 @@ function resolveLegacyAsset(projectId, filename) {
  * Throws if the filename can't be parsed or the board doesn't belong to
  * the project — those are programmer errors, not user input we should
  * silently swallow.
+ *
+ * Returns a Promise because blobStore.put is async (to accommodate the
+ * R2 backend). Callers should await.
  */
-function storeLegacyAsset(projectId, filename, bytes) {
+async function storeLegacyAsset(projectId, filename, bytes) {
   const parsed = parseLegacyFilename(filename);
   if (!parsed) {
     const err = new Error(`Cannot parse legacy filename: ${filename}`);
@@ -898,7 +901,7 @@ function storeLegacyAsset(projectId, filename, bytes) {
   }
 
   const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
-  const result = blobStore.put(buf, mimeForKind(parsed.kind));
+  const result = await blobStore.put(buf, mimeForKind(parsed.kind));
 
   const now = nowMs();
   stmts.upsertAsset.run(parsed.uid, parsed.kind, result.hash, null, now);
@@ -921,7 +924,7 @@ function storeLegacyAsset(projectId, filename, bytes) {
  * Optional meta is stored as JSON on the asset row (useful for e.g.
  * { duration: 3200, voice: '...', source: 'elevenlabs' } on audio assets).
  */
-function storeBoardAsset(projectId, boardUid, kind, bytes, mime, meta = null) {
+async function storeBoardAsset(projectId, boardUid, kind, bytes, mime, meta = null) {
   if (!kind || typeof kind !== 'string') {
     throw Object.assign(new Error('storeBoardAsset: kind required'), { code: 'BAD_KIND' });
   }
@@ -937,7 +940,7 @@ function storeBoardAsset(projectId, boardUid, kind, bytes, mime, meta = null) {
   }
 
   const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
-  const result = blobStore.put(buf, mime || 'application/octet-stream');
+  const result = await blobStore.put(buf, mime || 'application/octet-stream');
 
   const now = nowMs();
   const metaJson = meta && typeof meta === 'object' ? JSON.stringify(meta) : null;
