@@ -23,6 +23,7 @@ can invoke them directly:
 - `upload_image`, `upload_audio`
 - `generate_panel` (AI image gen, supports style presets)
 - `list_image_styles` (browse available style presets)
+- `list_voices` (browse TTS voices accessible on the configured account)
 - `generate_speech` (AI TTS — narration / dialogue)
 - `generate_sound_effect` (AI one-shot SFX)
 - `generate_music` (AI music composition)
@@ -363,6 +364,13 @@ Prompt tips:
 
 - **Speech**: write the text exactly as it should be spoken. Include
   punctuation for natural pauses. The voice ID controls the speaker.
+  **Call `list_voices` BEFORE `generate_speech` if you don't already
+  know which voice ID to pass** — picking a library-locked voice on a
+  free ElevenLabs plan returns `PROVIDER_REJECTED` (HTTP 422). The
+  server auto-falls-back to an owned voice when possible, but if the
+  account hasn't added any voices yet you'll need to surface the issue
+  to the user (they need to add a voice at
+  https://elevenlabs.io/app/voice-library or upgrade the plan).
 - **SFX**: keep it short and concrete. "thunderclap with rolling
   rumble", "footsteps on wet gravel", "old metal door creaking open".
   Pass `durationSeconds` if the default 5s isn't right.
@@ -576,6 +584,12 @@ capabilities are at `POST /api/agent/*` via direct HTTP — see the
 {}
 ```
 Returns `{ styles: [{ name, title, description, hasReferences, preferredModel }, ...] }`. Call before generate_panel if you're unsure which style to pick.
+
+### list_voices
+```json
+{}
+```
+Returns `{ voices: [{ voiceId, name, category, isOwned, description }, ...], defaultVoice: '<id>' }`. Call before generate_speech to pick a voice the account can actually use. Prefer voices with `isOwned: true`. On free ElevenLabs plans, only voices the user has explicitly added at https://elevenlabs.io/app/voice-library are owned.
 
 ### draw_shapes (annotate an AI panel)
 ```json

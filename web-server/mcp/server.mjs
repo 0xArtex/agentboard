@@ -38,6 +38,7 @@
  *   - upload_audio            upload base64 audio with kind (narration/sfx/...)
  *   - generate_panel          AI image generation (fal.ai, x402-gated)
  *   - list_image_styles       list available named visual style presets
+ *   - list_voices             list available TTS voices on the user's account
  *   - generate_speech         AI text-to-speech (ElevenLabs, x402-gated)
  *   - generate_sound_effect   AI sound effect generation (ElevenLabs, x402-gated)
  *   - generate_music          AI music composition (ElevenLabs, x402-gated)
@@ -160,14 +161,14 @@ server.registerTool(
       'generate_panel afterwards to fill in content.',
     inputSchema: {
       title: z.string().optional().describe('Project title, shown in the viewer and PDF header'),
-      aspectRatio: z.number().optional().describe('Aspect ratio width/height (default 1.7777 for 16:9)'),
-      fps: z.number().optional().describe('Frames per second for time calculations'),
-      defaultBoardTiming: z.number().optional().describe('Default duration per board in ms'),
+      aspectRatio: z.coerce.number().optional().describe('Aspect ratio width/height (default 1.7777 for 16:9)'),
+      fps: z.coerce.number().optional().describe('Frames per second for time calculations'),
+      defaultBoardTiming: z.coerce.number().optional().describe('Default duration per board in ms'),
       boards: z.array(z.object({
         dialogue: z.string().optional(),
         action: z.string().optional(),
         notes: z.string().optional(),
-        duration: z.number().optional(),
+        duration: z.coerce.number().optional(),
         shot: z.string().optional(),
         newShot: z.boolean().optional(),
       })).optional().describe('Boards to pre-create'),
@@ -230,7 +231,7 @@ server.registerTool(
       dialogue: z.string().optional(),
       action: z.string().optional(),
       notes: z.string().optional(),
-      duration: z.number().optional(),
+      duration: z.coerce.number().optional(),
       shot: z.string().optional(),
       newShot: z.boolean().optional(),
     },
@@ -253,7 +254,7 @@ server.registerTool(
         dialogue: z.string().optional(),
         action: z.string().optional(),
         notes: z.string().optional(),
-        duration: z.number().optional(),
+        duration: z.coerce.number().optional(),
         shot: z.string().optional(),
         newShot: z.boolean().optional(),
       })).describe('Array of boards to add'),
@@ -278,11 +279,11 @@ server.registerTool(
       projectId: z.string(),
       updates: z.array(z.object({
         boardUid: z.string(),
-        expectedVersion: z.number().optional(),
+        expectedVersion: z.coerce.number().optional(),
         dialogue: z.string().optional(),
         action: z.string().optional(),
         notes: z.string().optional(),
-        duration: z.number().optional(),
+        duration: z.coerce.number().optional(),
         shot: z.string().optional(),
         newShot: z.boolean().optional(),
       })),
@@ -334,7 +335,7 @@ server.registerTool(
       kind: z.string().optional().describe('narration | sfx | music | ambient | reference (default narration)'),
       audioBase64: z.string(),
       mime: z.string().optional().describe('audio/mpeg (default), audio/wav, audio/ogg'),
-      duration: z.number().optional().describe('Duration in ms, optional metadata'),
+      duration: z.coerce.number().optional().describe('Duration in ms, optional metadata'),
       voice: z.string().optional(),
     },
   },
@@ -374,10 +375,10 @@ server.registerTool(
         'flux-pro-v1.1, flux-pro-ultra, flux-kontext-multi (reference-based), flux-2-pro, ' +
         'sdxl. When style is set, the style\'s preferred model is used unless this is set.'
       ),
-      aspectRatio: z.number().optional(),
-      seed: z.number().optional(),
+      aspectRatio: z.coerce.number().optional(),
+      seed: z.coerce.number().optional(),
       negativePrompt: z.string().optional(),
-      steps: z.number().optional(),
+      steps: z.coerce.number().optional(),
     },
   },
   handle(async (args) => {
@@ -404,6 +405,25 @@ server.registerTool(
   })
 );
 
+// ── tool: list_voices ──────────────────────────────────────────────────
+server.registerTool(
+  'list_voices',
+  {
+    title: 'List available TTS voices',
+    description:
+      'Return the list of voices accessible on the configured ElevenLabs account, ' +
+      'with each voice\'s id, display name, category (premade/cloned/generated/professional), ' +
+      'and an isOwned flag. Call this BEFORE generate_speech if you\'re unsure which voice ' +
+      'id to pass — picking a library-locked voice on a free plan returns PROVIDER_REJECTED. ' +
+      'On the mock provider this returns a small set of fake voices for testing.',
+    inputSchema: {},
+  },
+  handle(async () => {
+    const result = await apiRequest('GET', '/api/agent/voices');
+    return okText(result);
+  })
+);
+
 // ── tool: generate_speech ──────────────────────────────────────────────
 server.registerTool(
   'generate_speech',
@@ -422,8 +442,8 @@ server.registerTool(
       text: z.string(),
       voice: z.string().optional().describe('ElevenLabs voice id'),
       model: z.string().optional().describe('eleven_turbo_v2_5 (default), eleven_multilingual_v2, ...'),
-      stability: z.number().optional(),
-      similarityBoost: z.number().optional(),
+      stability: z.coerce.number().optional(),
+      similarityBoost: z.coerce.number().optional(),
     },
   },
   handle(async (args) => {
@@ -448,8 +468,8 @@ server.registerTool(
       projectId: z.string(),
       boardUid: z.string(),
       prompt: z.string().describe('Short description of the sound, e.g. "distant thunder rumbling"'),
-      durationSeconds: z.number().optional().describe('Length in seconds (0.5-22, default 5)'),
-      promptInfluence: z.number().optional().describe('How strictly to follow the prompt (0-1, default provider choice)'),
+      durationSeconds: z.coerce.number().optional().describe('Length in seconds (0.5-22, default 5)'),
+      promptInfluence: z.coerce.number().optional().describe('How strictly to follow the prompt (0-1, default provider choice)'),
       kind: z.string().optional().describe('sfx (default) | ambient'),
     },
   },
@@ -475,7 +495,7 @@ server.registerTool(
       projectId: z.string(),
       boardUid: z.string(),
       prompt: z.string().describe('Description of the desired music — instruments, mood, tempo, genre (≤4100 chars)'),
-      musicLengthMs: z.number().optional().describe('Length in milliseconds (3000-600000, default 30000)'),
+      musicLengthMs: z.coerce.number().optional().describe('Length in milliseconds (3000-600000, default 30000)'),
       modelId: z.string().optional().describe('ElevenLabs music model (default "music_v1")'),
       forceInstrumental: z.boolean().optional().describe('If true, guarantees no vocals'),
       kind: z.string().optional().describe('music (default) | ambient'),
@@ -549,9 +569,9 @@ server.registerTool(
       strokes: z.array(z.object({
         brush: z.enum(['pencil', 'pen', 'ink', 'marker', 'eraser']).optional(),
         color: z.string().optional().describe('CSS color (default per brush)'),
-        size: z.number().optional().describe('Brush size in pixels (default per brush, max 200)'),
-        opacity: z.number().optional().describe('0-1 (default per brush)'),
-        points: z.array(z.array(z.number())).describe('Array of [x,y] points in [0,1] coordinates'),
+        size: z.coerce.number().optional().describe('Brush size in pixels (default per brush, max 200)'),
+        opacity: z.coerce.number().optional().describe('0-1 (default per brush)'),
+        points: z.array(z.array(z.coerce.number())).describe('Array of [x,y] points in [0,1] coordinates'),
       })).describe(
         'Array of strokes. Example: ' +
         '[{brush:"pencil",color:"#222",size:5,points:[[0.1,0.5],[0.3,0.4],[0.5,0.5],[0.7,0.6],[0.9,0.5]]}, ' +
@@ -622,7 +642,7 @@ server.registerTool(
       projectId: z.string(),
       permission: z.enum(['view', 'comment', 'edit']).optional().describe('Default view'),
       name: z.string().optional().describe('Human label, e.g. "client preview"'),
-      ttlMs: z.number().optional().describe('Token lifetime in ms. Omit for no expiry.'),
+      ttlMs: z.coerce.number().optional().describe('Token lifetime in ms. Omit for no expiry.'),
     },
   },
   handle(async (args) => {

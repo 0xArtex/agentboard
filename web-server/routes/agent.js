@@ -842,6 +842,27 @@ router.get('/image-styles', asyncHandler(async (req, res) => {
   res.json({ styles: imageGen.styles.listStyles() });
 }));
 
+// GET /api/agent/voices
+// Returns the list of TTS voices accessible on the configured ElevenLabs
+// account (or mock voices in dev mode). Use this BEFORE generate-speech if
+// you're not sure which voice id to pass — picking a library-locked voice
+// on a free plan returns 422 PROVIDER_REJECTED.
+//
+// Response: { voices: [{ voiceId, name, category, isOwned, description }],
+//             defaultVoice: '<id>' }
+router.get('/voices', asyncHandler(async (req, res) => {
+  try {
+    const result = await tts.listVoices();
+    res.json(result);
+  } catch (err) {
+    if (err instanceof tts.TtsError) {
+      const status = err.code === 'PROVIDER_UNAVAILABLE' ? 503 : 422;
+      return res.status(status).json({ error: { code: err.code, message: err.message } });
+    }
+    throw err;
+  }
+}));
+
 // ── AI text-to-speech ──────────────────────────────────────────────────
 //
 // POST /api/agent/generate-speech

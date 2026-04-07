@@ -130,6 +130,9 @@ class TtsProvider {
   async generateMusic(opts) {
     throw new TtsError('NOT_IMPLEMENTED', 'abstract TtsProvider.generateMusic');
   }
+  async listVoices() {
+    throw new TtsError('NOT_IMPLEMENTED', 'abstract TtsProvider.listVoices');
+  }
 }
 
 // ── tiny WAV encoder for the mock ─────────────────────────────────────
@@ -251,6 +254,19 @@ class MockTtsProvider extends TtsProvider {
     };
   }
 
+  // Mock voice list — returns a small handful of fake voices so smoke
+  // tests can exercise the route without hitting a real provider.
+  async listVoices() {
+    return {
+      voices: [
+        { voiceId: 'mock-voice-1', name: 'Alex (mock)',  category: 'premade', isOwned: true,  description: 'Neutral male, mock' },
+        { voiceId: 'mock-voice-2', name: 'Brielle (mock)', category: 'premade', isOwned: true,  description: 'Warm female, mock' },
+        { voiceId: 'mock-voice-3', name: 'Kai (mock)',  category: 'cloned',  isOwned: true,  description: 'Cloned, mock' },
+      ],
+      defaultVoice: 'mock-voice-1',
+    };
+  }
+
   // Music mock — three sine waves stacked into a triad chord, modulated
   // by a slow LFO. Sounds vaguely musical, definitely not speech, and is
   // deterministic per prompt.
@@ -316,6 +332,14 @@ class ElevenLabsTtsProvider extends TtsProvider {
     this.baseUrl = config.baseUrl || 'https://api.elevenlabs.io';
     this.timeoutMs = config.timeoutMs || DEFAULT_TIMEOUT_MS;
     this.defaultVoice = config.defaultVoice || process.env.ELEVENLABS_DEFAULT_VOICE || DEFAULT_ELEVENLABS_VOICE;
+    // Cache of /v1/voices output, populated lazily. ~5min TTL.
+    this._voicesCache = null;
+    this._voicesCacheAt = 0;
+    this._voicesCacheTtlMs = 5 * 60 * 1000;
+    // Resolved owned voice for fallback when the configured default is
+    // library-locked on the user's plan. Sticky for the process lifetime
+    // so we don't re-discover it on every request after the first miss.
+    this._fallbackVoice = null;
     if (!this.apiKey) {
       throw new Error('ElevenLabsTtsProvider requires ELEVENLABS_KEY env var or apiKey in config');
     }
@@ -323,20 +347,75 @@ class ElevenLabsTtsProvider extends TtsProvider {
 
   get name() { return 'elevenlabs'; }
 
-  async generate({ text, voice, model, stability, similarityBoost, style, speakerBoost }) {
-    const cleaned = validateText(text);
-    const voiceId = voice || this.defaultVoice;
-    if (!/^[A-Za-z0-9]{10,32}$/.test(voiceId)) {
-      throw new TtsError('BAD_VOICE', `voice must be an ElevenLabs voice id (got '${voiceId}')`);
-    }
-    const modelId = model || DEFAULT_ELEVENLABS_MODEL;
-    if (!ELEVENLABS_DEFAULT_MODELS.has(modelId)) {
-      throw new TtsError('BAD_MODEL',
-        `Unknown ElevenLabs model '${modelId}'. Known: ${[...ELEVENLABS_DEFAULT_MODELS].join(', ')}`);
+  // GET /v1/voices — returns the user's accessible voices.
+  // ElevenLabs response shape: { voices: [{ voice_id, name, category, ... }] }
+  // We normalize to { voiceId, name, category, isOwned, description }.
+  // `isOwned` is true for voices the user can use on their current plan
+  // (custom uploads, generated voices, voices they've added from the
+  // library). Premade voices marked otherwise are library-locked.
+  async listVoices() {
+    const now = Date.now();
+    if (this._voicesCache && now - this._voicesCacheAt < this._voicesCacheTtlMs) {
+      return this._voicesCache;
     }
 
+    const url = `${this.baseUrl}/v1/voices`;
+    const response = await this._withTimeout(
+      fetch(url, { method: 'GET', headers: { 'xi-api-key': this.apiKey } }),
+      'elevenlabs GET /v1/voices'
+    );
+    if (!response.ok) {
+      const text = await response.text().catch(() => '');
+      const code = response.status >= 500 ? 'PROVIDER_UNAVAILABLE' : 'PROVIDER_REJECTED';
+      throw new TtsError(code,
+        `elevenlabs GET /v1/voices returned ${response.status}: ${text.slice(0, 300)}`);
+    }
+    let json;
+    try { json = await response.json(); }
+    catch (e) { throw new TtsError('PROVIDER_MALFORMED', `elevenlabs /v1/voices returned non-JSON: ${e.message}`); }
+
+    const voices = (json.voices || []).map(v => ({
+      voiceId: v.voice_id,
+      name: v.name,
+      category: v.category || 'unknown',     // 'premade' | 'cloned' | 'generated' | 'professional'
+      // ElevenLabs sets `is_owner: true` for voices the user can actually
+      // call on their current plan — custom uploads, voice clones, AND
+      // premade voices the user has explicitly added to their account
+      // from the voice library. Free-tier accounts that haven't added
+      // any voice get is_owner=false on every voice, which means we
+      // can't auto-fall-back; the helpful error in `generate()` points
+      // them at the dashboard.
+      isOwned: v.is_owner === true,
+      description: v.description || '',
+    }));
+
+    const result = {
+      voices,
+      defaultVoice: this.defaultVoice,
+    };
+    this._voicesCache = result;
+    this._voicesCacheAt = now;
+    return result;
+  }
+
+  // Best-effort: pick a voice the user can actually use, prioritizing
+  // anything they own. Used by the auto-fallback path when ElevenLabs
+  // returns 402 / paid_plan_required for the default voice.
+  async _pickFallbackVoice() {
+    if (this._fallbackVoice) return this._fallbackVoice;
+    const list = await this.listVoices().catch(() => null);
+    if (!list || list.voices.length === 0) return null;
+    const owned = list.voices.find(v => v.isOwned);
+    const picked = owned || list.voices[0];
+    this._fallbackVoice = picked.voiceId;
+    return picked.voiceId;
+  }
+
+  // Single TTS call — used by both the main entrypoint AND the
+  // auto-fallback retry. Returns the parsed result OR throws TtsError.
+  async _ttsCall({ text, voiceId, modelId, stability, similarityBoost, style, speakerBoost }) {
     const body = {
-      text: cleaned,
+      text,
       model_id: modelId,
       voice_settings: {
         stability: stability != null ? Number(stability) : 0.5,
@@ -363,33 +442,112 @@ class ElevenLabsTtsProvider extends TtsProvider {
     if (!response.ok) {
       const text = await response.text().catch(() => '');
       const code = response.status >= 500 ? 'PROVIDER_UNAVAILABLE' : 'PROVIDER_REJECTED';
-      throw new TtsError(code,
-        `elevenlabs returned ${response.status}: ${text.slice(0, 500)}`,
+      // Detect the specific "library voice on free plan" error so the
+      // caller can decide whether to fall back to a different voice.
+      const isLibraryLocked = response.status === 402 || /paid_plan_required|library voices/i.test(text);
+      // ElevenLabs free tier flags accounts as 'detected_unusual_activity'
+      // after any sequence of suspicious-looking API calls (often the
+      // first failed attempt is enough). Surface a specific message so
+      // users know it's an account-state issue, not a code bug.
+      const isUnusualActivity = response.status === 401 && /detected_unusual_activity|unusual activity/i.test(text);
+      let message;
+      if (isUnusualActivity) {
+        message =
+          `ElevenLabs flagged this account with 'detected_unusual_activity' (HTTP 401). ` +
+          `This commonly happens to free accounts after a bad request. Log into ` +
+          `https://elevenlabs.io/app/usage to clear the flag (you may need to verify ` +
+          `email/phone), or upgrade to the Starter plan ($5/mo) which removes both this ` +
+          `restriction AND the library-voice paywall. Original body: ${text.slice(0, 200)}`;
+      } else {
+        message = `elevenlabs returned ${response.status}: ${text.slice(0, 500)}`;
+      }
+      const err = new TtsError(code, message,
         { providerMeta: { status: response.status, body: text.slice(0, 500) } });
+      err.libraryLocked = isLibraryLocked;
+      err.unusualActivity = isUnusualActivity;
+      throw err;
     }
 
     const arrayBuffer = await response.arrayBuffer();
     const bytes = Buffer.from(arrayBuffer);
     const mime = response.headers.get('content-type') || 'audio/mpeg';
+    return { bytes, mime };
+  }
 
-    // ElevenLabs doesn't return duration in headers. We could decode
-    // the mp3 to find it but that's more complexity than it's worth for
-    // v1 — agents can compute it client-side from the audio itself if
-    // they need exact timing. For the durationMs field we return a
-    // heuristic based on text length (matches the mock behaviour).
+  async generate({ text, voice, model, stability, similarityBoost, style, speakerBoost }) {
+    const cleaned = validateText(text);
+    const requestedVoice = voice || this.defaultVoice;
+    if (!/^[A-Za-z0-9]{10,32}$/.test(requestedVoice)) {
+      throw new TtsError('BAD_VOICE', `voice must be an ElevenLabs voice id (got '${requestedVoice}')`);
+    }
+    const modelId = model || DEFAULT_ELEVENLABS_MODEL;
+    if (!ELEVENLABS_DEFAULT_MODELS.has(modelId)) {
+      throw new TtsError('BAD_MODEL',
+        `Unknown ElevenLabs model '${modelId}'. Known: ${[...ELEVENLABS_DEFAULT_MODELS].join(', ')}`);
+    }
+
+    let usedVoice = requestedVoice;
+    let fellBack = false;
+    let result;
+
+    try {
+      result = await this._ttsCall({
+        text: cleaned, voiceId: requestedVoice, modelId,
+        stability, similarityBoost, style, speakerBoost,
+      });
+    } catch (err) {
+      // If the FAILURE was a library-voice-paid-plan rejection AND the
+      // caller didn't explicitly pin a voice, try to fall back to one
+      // the user actually owns. This avoids "first call always 402" for
+      // free-tier users on day one. If the caller pinned a voice they
+      // own and it still fails, no fallback — that's a real config error.
+      if (err.libraryLocked && !voice) {
+        const fb = await this._pickFallbackVoice();
+        if (fb && fb !== requestedVoice) {
+          console.warn(`[tts] elevenlabs default voice ${requestedVoice} is library-locked, falling back to ${fb}`);
+          try {
+            result = await this._ttsCall({
+              text: cleaned, voiceId: fb, modelId,
+              stability, similarityBoost, style, speakerBoost,
+            });
+            usedVoice = fb;
+            fellBack = true;
+          } catch (retryErr) {
+            // The fallback also failed — surface a helpful error pointing
+            // the user at the dashboard where they can add a voice.
+            throw new TtsError('PROVIDER_REJECTED',
+              `ElevenLabs rejected the default voice (library-locked on your plan) AND ` +
+              `the auto-selected fallback '${fb}'. Add a voice to your account at ` +
+              `https://elevenlabs.io/app/voice-library or upgrade your plan, then retry. ` +
+              `Original error: ${retryErr.message}`);
+          }
+        } else {
+          throw new TtsError('PROVIDER_REJECTED',
+            `ElevenLabs rejected voice '${requestedVoice}' (library-locked on your plan) ` +
+            `and no owned voices were found in your account. Add a voice at ` +
+            `https://elevenlabs.io/app/voice-library or upgrade your plan, then retry.`);
+        }
+      } else {
+        throw err;
+      }
+    }
+
+    // ElevenLabs doesn't return duration in headers. Heuristic from text length.
     const durationMs = Math.round(cleaned.length * 60);
 
     return {
-      bytes,
-      mime,
+      bytes: result.bytes,
+      mime: result.mime,
       durationMs,
       providerMeta: {
         provider: 'elevenlabs',
         kind: 'speech',
         model: modelId,
-        voice: voiceId,
+        voice: usedVoice,
+        requestedVoice,
+        fellBack,
         text: cleaned,
-        byteSize: bytes.length,
+        byteSize: result.bytes.length,
         characterCost: cleaned.length,
       },
     };
@@ -599,6 +757,11 @@ async function generateMusic(opts) {
   }
 }
 
+async function listVoices() {
+  const provider = getProvider();
+  return await provider.listVoices();
+}
+
 module.exports = {
   TtsProvider,
   TtsError,
@@ -610,6 +773,7 @@ module.exports = {
   generateSpeech,
   generateSoundEffect,
   generateMusic,
+  listVoices,
   validateText,
   validatePrompt,
   validateSfxDuration,
