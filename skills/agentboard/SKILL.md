@@ -21,7 +21,8 @@ can invoke them directly:
 - `get_project`, `list_projects`
 - `add_board`, `add_scene`, `set_metadata`
 - `upload_image`, `upload_audio`
-- `generate_panel` (AI image gen)
+- `generate_panel` (AI image gen, supports style presets)
+- `list_image_styles` (browse available style presets)
 - `generate_speech` (AI TTS)
 - `export_pdf`
 - `get_board_url`, `mint_share_token`
@@ -34,6 +35,7 @@ directly at `AGENTBOARD_URL` (default `http://localhost:3456`):
 - `POST /api/agent/draw`, `/upload-audio`
 - `POST /api/agent/export/pdf`
 - `GET /api/agent/project/:id`, `/projects`, `/share/:id`
+- `GET /api/agent/image-styles` — list style presets
 
 Both paths pass through the same auth, permissions, and payment layers.
 Request/response shapes are identical.
@@ -117,6 +119,41 @@ Use `negativePrompt` to exclude common failures: "blurry, low detail,
 extra fingers, deformed hands, text, watermark".
 
 Pass an explicit `seed` if you want reproducibility across calls.
+
+## Style presets — visual consistency across panels
+
+Pass `style: "<preset>"` to `generate_panel` (or include `style` in the
+REST `/api/agent/generate-image` body) to lock all panels to the same
+visual look. The server prepends a curated system prompt and, for
+reference-based styles, sends curated reference images to the model.
+This is the easiest way to keep an entire storyboard visually coherent:
+choose one style at the start of the project and pass it to every
+generate call.
+
+Available presets (call `list_image_styles` for the live list):
+
+- `storyboard-sketch` — black & white rough marker-style storyboard
+  panels with two reference images. Auto-promotes to
+  `flux-kontext-multi` so the references can guide the output. Best
+  default for traditional storyboard look.
+- `cinematic-color` — full-color cinematic stills, dramatic lighting.
+  No reference images, uses `flux-pro-v1.1`.
+- `comic-panel` — comic book inks + flats, bold linework. No
+  references.
+
+When you pass a `style`, you can omit `model` — the preset's preferred
+model is used. If you also pass an explicit `model` that doesn't
+support references but the style HAS references, the server
+auto-promotes you to a kontext-capable model so the refs aren't
+silently dropped.
+
+The response includes `style.title`, `style.referenceCount`, and the
+final `model` so you can confirm what was used. The same metadata is
+persisted in the board's asset record, so later reads show what style
+each panel was generated with.
+
+`BAD_STYLE` (HTTP 400) means an unknown preset name. Call
+`list_image_styles` to see what's available.
 
 ## Workflow: collaboratively edit an existing project
 

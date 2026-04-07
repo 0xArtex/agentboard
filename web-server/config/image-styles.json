@@ -1,0 +1,34 @@
+{
+  "$schema": "image-styles schema v1",
+  "$description": "Named style presets for generate_panel. Each preset defines a system prompt that gets prepended to the user's prompt, optional reference images that guide the model's style, and the preferred model to route to. Prompts are crafted for Flux Kontext reference-based generation — when references are present, they carry the visual style so the prompt can focus on content instead of describing the look. Loaded at module import + hot-reloaded via fs.watch.",
+
+  "storyboard-sketch": {
+    "name": "Black & White Storyboard Sketch",
+    "description": "Rough hand-drawn pre-production storyboard style. Loose marker lines, high contrast black on white, minimal detail, clear silhouettes. Matches the aesthetic of classic animated film pre-visualization art.",
+    "systemPrompt": "Black and white rough storyboard sketch. Hand-drawn marker lines, loose and gestural, high contrast. Minimal detail focused on action, composition, and silhouettes. Dramatic shadows as thick ink strokes. Classic pre-production animated film panel style. Monochrome only — no color.",
+    "references": [
+      "assets/reference-images/storyboard-sketch-1.png",
+      "assets/reference-images/storyboard-sketch-2.png"
+    ],
+    "preferredModel": "flux-kontext-multi",
+    "negativePrompt": "color, photorealistic, 3d render, polished, digital art, painting, watercolor, anime, blurry, low contrast"
+  },
+
+  "cinematic-color": {
+    "name": "Cinematic Color Concept",
+    "description": "High-quality color concept art in the style of film pre-production. Dramatic lighting, painterly, moody. No reference images — pure prompt-driven.",
+    "systemPrompt": "Cinematic color concept art, painterly style, dramatic lighting, film pre-production quality, rich atmospheric mood, wide aspect composition.",
+    "references": [],
+    "preferredModel": "flux-pro-v1.1",
+    "negativePrompt": "blurry, low detail, watermark, text, logo, amateur"
+  },
+
+  "comic-panel": {
+    "name": "Comic Book Panel",
+    "description": "Inked + colored comic book panel with bold linework and dramatic cel shading.",
+    "systemPrompt": "Comic book panel, bold ink linework, cel-shaded color, dramatic lighting, strong composition, pre-production storyboard style with color.",
+    "references": [],
+    "preferredModel": "flux-pro-v1.1",
+    "negativePrompt": "photorealistic, 3d, blurry, sketch, pencil, watercolor"
+  }
+}

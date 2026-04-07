@@ -50,6 +50,17 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
+import { config as dotenvConfig } from 'dotenv';
+import { fileURLToPath } from 'url';
+import * as path from 'path';
+
+// Load .env alongside the MCP server file so running the server directly
+// (without going through the web-server) still picks up AGENTBOARD_URL,
+// AGENTBOARD_TOKEN, AGENTBOARD_X402_PAYMENT, etc from a file on disk.
+// The MCP client's own `env` block always wins when set.
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+dotenvConfig({ path: path.join(__dirname, '..', '.env') });
 
 const AGENTBOARD_URL = process.env.AGENTBOARD_URL || 'http://localhost:3456';
 const AGENTBOARD_TOKEN = process.env.AGENTBOARD_TOKEN || null;
@@ -336,14 +347,28 @@ server.registerTool(
     description:
       'Generate an image for a board layer using AI (fal.ai). The server calls the ' +
       'image-gen provider, downloads the result, and stores it as the specified layer. ' +
-      'This route is x402-gated in production: the MCP client must supply the ' +
-      'X-Payment header via the AGENTBOARD_X402_PAYMENT env var.',
+      'Use the optional `style` parameter to pick a named aesthetic preset — ' +
+      '"storyboard-sketch" produces classic black-and-white rough marker sketches ' +
+      'with reference-image guidance (the preferred style for pre-production panels); ' +
+      '"cinematic-color" produces painterly color concept art; "comic-panel" produces ' +
+      'inked + cel-shaded comic-book style. Call list_image_styles to discover all ' +
+      'available presets. This route is x402-gated in production: the MCP client must ' +
+      'supply the X-Payment header via the AGENTBOARD_X402_PAYMENT env var.',
     inputSchema: {
       projectId: z.string(),
       boardUid: z.string(),
       layer: z.string().optional().describe('Target layer (default fill)'),
-      prompt: z.string().describe('Image generation prompt'),
-      model: z.string().optional().describe('flux-schnell (default), flux-dev, flux-pro, sdxl, ...'),
+      prompt: z.string().describe('Image generation prompt. When style is set, focus on content/action — the style preset handles the look.'),
+      style: z.string().optional().describe(
+        'Named style preset. "storyboard-sketch" for black-and-white rough sketches ' +
+        '(uses reference images + Flux Kontext). "cinematic-color" for painterly concept art. ' +
+        '"comic-panel" for inked comic style. Call list_image_styles to discover all options.'
+      ),
+      model: z.string().optional().describe(
+        'Explicit model override. flux-schnell (fastest + cheapest), flux-dev, flux-pro, ' +
+        'flux-pro-v1.1, flux-pro-ultra, flux-kontext-multi (reference-based), flux-2-pro, ' +
+        'sdxl. When style is set, the style\'s preferred model is used unless this is set.'
+      ),
       aspectRatio: z.number().optional(),
       seed: z.number().optional(),
       negativePrompt: z.string().optional(),
@@ -352,6 +377,24 @@ server.registerTool(
   },
   handle(async (args) => {
     const result = await apiRequest('POST', '/api/agent/generate-image', args);
+    return okText(result);
+  })
+);
+
+// ── tool: list_image_styles ────────────────────────────────────────────
+server.registerTool(
+  'list_image_styles',
+  {
+    title: 'List available image style presets',
+    description:
+      'Return the list of named style presets available to generate_panel. Each ' +
+      'entry includes the style name, title, description, preferred model, and ' +
+      'whether it uses reference images. Call this before generate_panel if you\'re ' +
+      'not sure which style to pick, or to surface options to a human user.',
+    inputSchema: {},
+  },
+  handle(async () => {
+    const result = await apiRequest('GET', '/api/agent/image-styles');
     return okText(result);
   })
 );

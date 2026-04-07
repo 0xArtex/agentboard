@@ -1,3 +1,8 @@
+// Load .env FIRST, before any module reads from process.env. Silent if
+// the file isn't there — production sets env vars via the hosting
+// platform's secrets manager instead of a file on disk.
+require('dotenv').config({ path: require('path').join(__dirname, '.env') });
+
 const express = require('express');
 const http = require('http');
 const { Server: SocketIO } = require('socket.io');
@@ -67,8 +72,40 @@ app.use('/api/agents', agentsRouter);
 app.use('/api/app', appRouter);
 
 // ── Health check ──
+// Returns operational status plus a fingerprint of which providers and
+// backends are currently active. Meant for both human eyeballing during
+// debugging AND for deploy-time readiness probes (uptime monitors,
+// Kubernetes liveness checks, etc). Never touches the network — reports
+// only what's locally observable without external calls.
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', version: require('./package.json').version });
+  const pkg = require('./package.json');
+  const { blobStore } = require('./services/blob-store');
+  const x402 = require('./services/x402');
+  const imageGen = require('./services/image-gen');
+  const tts = require('./services/tts');
+  const x402Cfg = x402.getConfig();
+  res.json({
+    status: 'ok',
+    version: pkg.version,
+    uptime: Math.round(process.uptime()),
+    backends: {
+      blob: blobStore.backend,               // 'disk' | 'r2'
+      imageGen: imageGen.getProvider().name, // 'mock' | 'fal-ai'
+      tts: tts.getProvider().name,           // 'mock' | 'elevenlabs'
+    },
+    x402: {
+      enabled: x402Cfg.enabled,
+      mode: x402Cfg.mode,                    // 'off' | 'mock' | 'facilitator' | 'chain'
+      network: x402Cfg.network,
+    },
+    auth: {
+      enforced: process.env.AGENT_AUTH_ENABLED === '1',
+    },
+    rateLimits: {
+      frequency: process.env.RATE_LIMIT_ENABLED === '1',
+      spend: process.env.SPEND_LIMIT_ENABLED === '1',
+    },
+  });
 });
 
 // ── Filesystem API (used by electron-shim fs shim) ──
@@ -236,9 +273,76 @@ server.listen(PORT, async () => {
   console.log(`   WebSocket: ws://localhost:${PORT}`);
   console.log(`   Health:    http://localhost:${PORT}/api/health`);
   console.log(`   Web App:   http://localhost:${PORT}/\n`);
-  
+
   await ensureUserDataDefaults();
   await ensureDefaultProject();
 });
 
-module.exports = { app, server, io };
+// ── Graceful shutdown ──
+//
+// Production deploys (systemd, Docker, Fly.io, Railway) send SIGTERM
+// when stopping the process. We need to:
+//   1. Stop accepting new HTTP connections
+//   2. Let in-flight requests finish (up to a timeout)
+//   3. Close the socket.io server (disconnects websocket clients cleanly)
+//   4. Close the SQLite connection so the WAL is flushed to the main DB
+//   5. Exit with code 0
+//
+// If shutdown takes longer than FORCE_EXIT_MS, we log a warning and
+// exit anyway — better to drop a few in-flight requests than hang
+// forever under load.
+let shuttingDown = false;
+const FORCE_EXIT_MS = 10_000;
+
+function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`\n[server] received ${signal}, starting graceful shutdown...`);
+
+  const forceTimer = setTimeout(() => {
+    console.warn(`[server] shutdown exceeded ${FORCE_EXIT_MS}ms, forcing exit`);
+    process.exit(1);
+  }, FORCE_EXIT_MS);
+  forceTimer.unref();
+
+  // 1. stop accepting new connections
+  server.close((err) => {
+    if (err) {
+      console.error('[server] HTTP close error:', err);
+    }
+
+    // 2. close socket.io clients
+    io.close((ioErr) => {
+      if (ioErr) console.error('[server] socket.io close error:', ioErr);
+
+      // 3. close SQLite
+      try {
+        const { db } = require('./services/db');
+        db.close();
+        console.log('[server] SQLite closed cleanly');
+      } catch (dbErr) {
+        console.error('[server] SQLite close error:', dbErr);
+      }
+
+      console.log('[server] shutdown complete');
+      clearTimeout(forceTimer);
+      process.exit(0);
+    });
+  });
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+
+// Uncaught error handlers — log structured, don't crash the process.
+// Express's own error handler catches route exceptions; these are for
+// truly out-of-band errors (unhandled promise rejections, etc).
+process.on('unhandledRejection', (reason) => {
+  console.error('[server] unhandledRejection:', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[server] uncaughtException:', err);
+  // Only exit on genuinely fatal errors; most uncaughts are non-fatal.
+});
+
+module.exports = { app, server, io, shutdown };

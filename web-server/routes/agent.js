@@ -507,6 +507,12 @@ router.post('/upload-audio', requireProjectAccess('write'), asyncHandler(async (
 //   layer:         string   (optional, default 'fill')
 //   prompt:        string   (required, 2-2000 chars)
 //   model?:        string   (default 'flux-schnell'; provider-specific)
+//   style?:        string   (optional — named preset from config/image-styles.json.
+//                             When set, prepends the preset's systemPrompt, loads
+//                             its reference images, and auto-selects the preferred
+//                             model. Current presets: 'storyboard-sketch',
+//                             'cinematic-color', 'comic-panel'. Use 'storyboard-sketch'
+//                             for the classic B&W rough-sketch look.)
 //   aspectRatio?:  number   (default: the project's aspectRatio)
 //   seed?:         number
 //   negativePrompt?: string
@@ -515,9 +521,9 @@ router.post('/upload-audio', requireProjectAccess('write'), asyncHandler(async (
 //
 // Gated by x402 in prod (0.25 USDC default). Generated image is stored as
 // a layer asset on the target board with provider metadata (prompt, seed,
-// model) tucked into the board_assets meta JSON for future reference.
+// model, style) tucked into the board_assets meta JSON for future reference.
 //
-// Response 201: { hash, size, kind, boardUid, provider, model, prompt, imageUrl }
+// Response 201: { hash, size, kind, boardUid, provider, model, prompt, style?, imageUrl }
 router.post('/generate-image',
   frequencyLimiter({ windowMs: 60_000, max: 20 }),
   x402Gate({
@@ -554,6 +560,7 @@ router.post('/generate-image',
         seed: body.seed,
         negativePrompt: body.negativePrompt,
         steps: body.steps,
+        style: body.style,
       });
     } catch (err) {
       if (req.x402Payment) req.x402Payment.markFailed(err);
@@ -561,6 +568,8 @@ router.post('/generate-image',
         const statusByCode = {
           BAD_PROMPT: 400,
           BAD_MODEL: 400,
+          BAD_STYLE: 400,
+          BAD_STYLE_REFERENCE: 500,     // config says file should exist but it doesn't
           PROVIDER_REJECTED: 422,       // content moderation / bad input
           PROVIDER_MALFORMED: 502,      // upstream spoke garbage
           PROVIDER_UNAVAILABLE: 503,    // transient
@@ -588,6 +597,8 @@ router.post('/generate-image',
           provider: result.providerMeta.provider,
           model: result.providerMeta.model,
           seed: result.providerMeta.seed,
+          style: result.providerMeta.style || null,
+          referenceCount: result.providerMeta.referenceCount || 0,
           generatedAt: Date.now(),
         }
       );
@@ -612,12 +623,21 @@ router.post('/generate-image',
       provider: result.providerMeta.provider,
       model: result.providerMeta.model,
       prompt: result.providerMeta.prompt,
+      style: result.providerMeta.style || null,
+      referenceCount: result.providerMeta.referenceCount || 0,
       imageUrl: `${urls.apiUrl.replace('/api/projects/', '/web/projects/')}/images/board-${
         projectResult.project.boards.find(b => b.uid === boardUid).number
       }-${boardUid}-${layer}.png`,
     });
   })
 );
+
+// GET /api/agent/image-styles
+// Returns the list of named style presets that can be passed as `style`
+// to /generate-image. Lets agents discover available options at runtime.
+router.get('/image-styles', asyncHandler(async (req, res) => {
+  res.json({ styles: imageGen.styles.listStyles() });
+}));
 
 // ── AI text-to-speech ──────────────────────────────────────────────────
 //

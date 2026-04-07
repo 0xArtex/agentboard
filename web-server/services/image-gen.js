@@ -37,6 +37,7 @@
 
 const crypto = require('crypto');
 const { coloredPng, dimensionsForAspect } = require('./blank-png');
+const imageStyles = require('./image-styles');
 
 // Hard timeout for any provider call. Agents care about latency; if a
 // provider can't respond in 45s we return PROVIDER_UNAVAILABLE and let
@@ -98,7 +99,7 @@ class MockImageGenProvider extends ImageGenProvider {
   get name() { return 'mock'; }
   get isMock() { return true; }
 
-  async generate({ prompt, aspectRatio = 1.7777, model, seed }) {
+  async generate({ prompt, aspectRatio = 1.7777, model, seed, references = [] }) {
     const cleaned = validatePrompt(prompt);
     // Validate model against the same set fal.ai knows about, so mock
     // mode has production-parity error behaviour. This lets tests cover
@@ -134,6 +135,7 @@ class MockImageGenProvider extends ImageGenProvider {
         prompt: cleaned,
         dimensions: { width: w, height: h },
         color: { r, g, b },
+        referenceCount: references.length,
       },
     };
   }
@@ -143,16 +145,50 @@ class MockImageGenProvider extends ImageGenProvider {
 
 // Map our canonical model names to fal.ai endpoints. Callers use the short
 // form; we look up the real path here so changing endpoints doesn't leak
-// into route code.
+// into route code. Update paths here if fal.ai rearranges their URL scheme
+// — nothing else in the system needs to know.
 const FAL_MODEL_PATHS = {
+  // ── classic Flux family (text-only) ──
   'flux-schnell':    'fal-ai/flux/schnell',
   'flux-dev':        'fal-ai/flux/dev',
   'flux-pro':        'fal-ai/flux-pro',
   'flux-pro-v1.1':   'fal-ai/flux-pro/v1.1',
+  'flux-pro-ultra':  'fal-ai/flux-pro/v1.1-ultra',
+
+  // ── Flux Kontext family (reference-image guided) ──
+  // Use these when the agent passes reference images via `style:` presets
+  // with a non-empty references[] array. Kontext models accept image_url
+  // (single) or image_urls (multi) in the request body and steer the
+  // output to match the reference aesthetic.
+  'flux-kontext':       'fal-ai/flux-pro/kontext',
+  'flux-kontext-max':   'fal-ai/flux-pro/kontext/max',
+  'flux-kontext-multi': 'fal-ai/flux-pro/kontext/multi',
+
+  // ── Flux 2 Pro (latest generation flagship) ──
+  // If fal.ai's path differs, update here — this is the one-line fix.
+  'flux-2-pro':      'fal-ai/flux-2/pro',
+
+  // ── non-Flux alternatives ──
   'sdxl':            'fal-ai/fast-sdxl',
   'stable-diffusion-3.5': 'fal-ai/stable-diffusion-v35-large',
 };
 const DEFAULT_FAL_MODEL = 'flux-schnell';
+
+// Models that accept reference images via image_url / image_urls in the
+// request body. When the caller passes references but picks a model NOT
+// in this set, we auto-promote to flux-kontext-multi so references don't
+// get silently dropped.
+const FAL_MODELS_WITH_REFERENCES = new Set([
+  'flux-kontext',
+  'flux-kontext-max',
+  'flux-kontext-multi',
+]);
+
+// Of those, which accept MULTIPLE references via image_urls (array).
+// Single-reference models use image_url (scalar).
+const FAL_MODELS_WITH_MULTI_REFERENCES = new Set([
+  'flux-kontext-multi',
+]);
 
 // Map aspect ratio to fal.ai's image_size vocabulary. fal uses named
 // presets for common ratios and accepts { width, height } for custom.
@@ -180,9 +216,31 @@ class FalAiImageGenProvider extends ImageGenProvider {
 
   get name() { return 'fal-ai'; }
 
-  async generate({ prompt, aspectRatio = 1.7777, model, seed, negativePrompt, steps }) {
+  async generate({ prompt, aspectRatio = 1.7777, model, seed, negativePrompt, steps, references = [] }) {
     const cleaned = validatePrompt(prompt);
-    const modelKey = model || DEFAULT_FAL_MODEL;
+    let modelKey = model || DEFAULT_FAL_MODEL;
+
+    // If the caller provided references but chose a model that doesn't
+    // support them, auto-promote to flux-kontext-multi so the references
+    // actually take effect. We log the promotion so this is visible in
+    // server logs but don't error — it's a user-friendly fix, not a bug.
+    if (references.length > 0 && !FAL_MODELS_WITH_REFERENCES.has(modelKey)) {
+      console.log(
+        `[fal-ai] model '${modelKey}' doesn't accept references — ` +
+        `auto-promoting to 'flux-kontext-multi' (${references.length} refs)`
+      );
+      modelKey = 'flux-kontext-multi';
+    }
+    // Single-reference kontext model with multiple refs → promote to multi.
+    if (references.length > 1 && modelKey === 'flux-kontext') {
+      modelKey = 'flux-kontext-multi';
+    }
+    // Zero refs on the multi-reference model → fall back to a text-only model.
+    if (references.length === 0 && FAL_MODELS_WITH_REFERENCES.has(modelKey)) {
+      // Keep the caller's intent if they explicitly picked kontext — just
+      // call it without references. fal.ai's kontext accepts empty image_urls.
+    }
+
     const modelPath = FAL_MODEL_PATHS[modelKey];
     if (!modelPath) {
       throw new ImageGenError('BAD_MODEL',
@@ -191,12 +249,28 @@ class FalAiImageGenProvider extends ImageGenProvider {
 
     const body = {
       prompt: cleaned,
-      image_size: falImageSize(aspectRatio),
       num_images: 1,
     };
+    // image_size isn't accepted by every model (kontext variants infer from
+    // references), so only set it for classic models.
+    if (!FAL_MODELS_WITH_REFERENCES.has(modelKey)) {
+      body.image_size = falImageSize(aspectRatio);
+    }
     if (seed != null) body.seed = Number(seed);
     if (negativePrompt) body.negative_prompt = String(negativePrompt);
     if (steps != null) body.num_inference_steps = Number(steps);
+
+    // Attach reference images if provided. Kontext-multi accepts an array;
+    // single-reference kontext accepts a scalar. Each reference can be a
+    // data URI string OR an { dataUri } object from image-styles.resolveStyle.
+    if (references.length > 0) {
+      const refUrls = references.map(r => typeof r === 'string' ? r : r.dataUri);
+      if (FAL_MODELS_WITH_MULTI_REFERENCES.has(modelKey)) {
+        body.image_urls = refUrls;
+      } else {
+        body.image_url = refUrls[0];
+      }
+    }
 
     // Submit generation request
     const url = `${this.baseUrl}/${modelPath}`;
@@ -251,7 +325,7 @@ class FalAiImageGenProvider extends ImageGenProvider {
       mime,
       providerMeta: {
         provider: 'fal-ai',
-        model: modelKey,
+        model: modelKey,           // may have been promoted if references forced a kontext model
         modelPath,
         seed: json.seed || seed || null,
         prompt: cleaned,
@@ -262,6 +336,7 @@ class FalAiImageGenProvider extends ImageGenProvider {
           : null,
         hasNsfw: json.has_nsfw_concepts || null,
         timingsMs: json.timings || null,
+        referenceCount: references.length,
       },
     };
   }
@@ -316,21 +391,65 @@ function getProvider() {
 function resetProvider() { _provider = null; }
 
 /**
- * High-level entrypoint. Single try + single retry on PROVIDER_UNAVAILABLE,
- * because transient 5xx / network blips shouldn't cost the agent a fresh
- * x402 payment.
+ * High-level entrypoint. Handles style preset resolution, then dispatches
+ * to the active provider with a single retry on PROVIDER_UNAVAILABLE.
+ *
+ * opts.style (optional) — name of a style preset from config/image-styles.json.
+ * When set, the preset's systemPrompt is composed with the user prompt,
+ * reference images are loaded from disk and passed to the provider, and
+ * the preset's preferredModel overrides opts.model unless the caller
+ * explicitly supplied a model.
  */
 async function generateImage(opts) {
+  let finalOpts = { ...opts };
+
+  if (opts.style) {
+    let style;
+    try {
+      style = imageStyles.resolveStyle(opts.style);
+    } catch (err) {
+      // Re-throw as ImageGenError so the route handler maps it to 400
+      throw new ImageGenError(
+        err.code || 'BAD_STYLE',
+        err.message,
+        { cause: err }
+      );
+    }
+    finalOpts.prompt = imageStyles.composePrompt(style, opts.prompt);
+    // Only override model if the caller didn't pin one explicitly.
+    if (!opts.model && style.preferredModel) {
+      finalOpts.model = style.preferredModel;
+    }
+    // Merge negative prompts: user > style
+    if (!opts.negativePrompt && style.negativePrompt) {
+      finalOpts.negativePrompt = style.negativePrompt;
+    }
+    // Pass reference images through — the fal provider picks the right
+    // body shape (image_url vs image_urls) based on the model.
+    finalOpts.references = style.references;
+    finalOpts._resolvedStyle = {
+      name: style.name,
+      title: style.title,
+      referenceCount: style.references.length,
+    };
+  }
+
   const provider = getProvider();
   try {
-    return await provider.generate(opts);
+    const result = await provider.generate(finalOpts);
+    // Surface the resolved style in providerMeta so the caller can see
+    // which preset (if any) was applied.
+    if (finalOpts._resolvedStyle && result.providerMeta) {
+      result.providerMeta.style = finalOpts._resolvedStyle;
+    }
+    return result;
   } catch (err) {
     if (!(err instanceof ImageGenError) || err.code !== 'PROVIDER_UNAVAILABLE') {
       throw err;
     }
     // One retry on transient failures
     console.warn(`[image-gen] ${provider.name} transient failure, retrying once: ${err.message}`);
-    return await provider.generate(opts);
+    return await provider.generate(finalOpts);
   }
 }
 
@@ -346,4 +465,8 @@ module.exports = {
   validatePrompt,
   MIN_PROMPT_LEN,
   MAX_PROMPT_LEN,
+  // Re-export so routes don't need to require both modules
+  styles: imageStyles,
+  FAL_MODEL_PATHS,
+  FAL_MODELS_WITH_REFERENCES,
 };
