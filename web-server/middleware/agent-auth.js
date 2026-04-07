@@ -86,11 +86,20 @@ function agentAuthMiddleware(req, res, next) {
 }
 
 /**
- * Route-level guard: require an authenticated agent regardless of method.
- * Use on routes that should never be anonymous (e.g. create-token).
+ * Route-level guard: require a caller identity regardless of method.
+ * In prod (AGENT_AUTH_ENABLED=1) this means an actual bearer-token-backed
+ * agent. In dev (=0, default) the anonymous default user is fine — the
+ * point of this guard is to distinguish "needs to know who's calling"
+ * from "is public," not to force prod-level auth on local dev.
  */
 function requireAgent(req, res, next) {
-  if (!req.agent || !req.agent.authenticated) {
+  const authEnabled = process.env.AGENT_AUTH_ENABLED === '1';
+  if (!req.agent) {
+    return res.status(401).json({
+      error: { code: 'AUTH_REQUIRED', message: 'No agent on request' },
+    });
+  }
+  if (authEnabled && !req.agent.authenticated) {
     return res.status(401).json({
       error: { code: 'AUTH_REQUIRED', message: 'This route requires authentication' },
     });

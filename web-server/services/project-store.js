@@ -58,10 +58,17 @@ const stmts = {
   // projects
   insertProject: db.prepare(`
     INSERT INTO projects
-      (id, version, aspect_ratio, fps, default_board_timing, meta, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      (id, version, aspect_ratio, fps, default_board_timing, meta, owner_id, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `),
   getProject: db.prepare('SELECT * FROM projects WHERE id = ?'),
+  listProjectsByOwner: db.prepare(`
+    SELECT id, version, aspect_ratio, fps, updated_at, owner_id,
+           (SELECT COUNT(*) FROM boards WHERE project_id = p.id) AS board_count
+      FROM projects p
+     WHERE owner_id = ?
+     ORDER BY updated_at DESC
+  `),
   updateProjectFields: db.prepare(`
     UPDATE projects
        SET version              = COALESCE(?, version),
@@ -274,13 +281,16 @@ function rowToBoard(row) {
 }
 
 function rowToProject(row) {
-  return {
+  const meta = row.meta ? safeParse(row.meta) : null;
+  const project = {
     version: row.version,
     aspectRatio: row.aspect_ratio,
     fps: row.fps,
     defaultBoardTiming: row.default_board_timing,
     boards: stmts.listBoardsForProject.all(row.id).map(rowToBoard),
   };
+  if (meta && typeof meta === 'object') project.meta = meta;
+  return project;
 }
 
 function safeParse(s) {
@@ -292,6 +302,10 @@ function safeParse(s) {
 async function createProject(opts = {}) {
   const id = uuidv4();
   const now = nowMs();
+  // Owner defaults to the built-in default user so legacy code paths that
+  // don't know about identity still work. Agent routes always pass a real
+  // ownerId from req.agent.userId.
+  const ownerId = opts.ownerId || '00000000-0000-0000-0000-000000000001';
   stmts.insertProject.run(
     id,
     opts.version || '0.6.0',
@@ -299,11 +313,23 @@ async function createProject(opts = {}) {
     opts.fps || 24,
     opts.defaultBoardTiming || 2000,
     null, // meta
+    ownerId,
     now,
     now
   );
   const row = stmts.getProject.get(id);
   return { id, project: rowToProject(row) };
+}
+
+async function listProjectsByOwner(ownerId) {
+  return stmts.listProjectsByOwner.all(ownerId).map(r => ({
+    id: r.id,
+    boardCount: r.board_count,
+    aspectRatio: r.aspect_ratio,
+    version: r.version,
+    ownerId: r.owner_id,
+    updatedAt: r.updated_at,
+  }));
 }
 
 async function getProject(id) {
@@ -805,6 +831,71 @@ function storeLegacyAsset(projectId, filename, bytes) {
   return { hash: result.hash, kind: parsed.kind, boardUid: parsed.uid };
 }
 
+/**
+ * Direct asset writer — no legacy filename parsing. Used by agent routes
+ * that know the target (projectId, boardUid, kind) explicitly, e.g. audio
+ * uploads and image-gen results. Mime type is caller-supplied (image/png,
+ * audio/mpeg, etc) because kind alone doesn't disambiguate audio formats.
+ *
+ * Optional meta is stored as JSON on the asset row (useful for e.g.
+ * { duration: 3200, voice: '...', source: 'elevenlabs' } on audio assets).
+ */
+function storeBoardAsset(projectId, boardUid, kind, bytes, mime, meta = null) {
+  if (!kind || typeof kind !== 'string') {
+    throw Object.assign(new Error('storeBoardAsset: kind required'), { code: 'BAD_KIND' });
+  }
+  const board = stmts.getBoard.get(boardUid);
+  if (!board) {
+    throw Object.assign(new Error(`No board with uid ${boardUid}`), { code: 'NO_BOARD' });
+  }
+  if (board.project_id !== projectId) {
+    throw Object.assign(
+      new Error(`Board ${boardUid} does not belong to project ${projectId}`),
+      { code: 'WRONG_PROJECT' }
+    );
+  }
+
+  const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+  const result = blobStore.put(buf, mime || 'application/octet-stream');
+
+  const now = nowMs();
+  const metaJson = meta && typeof meta === 'object' ? JSON.stringify(meta) : null;
+  stmts.upsertAsset.run(boardUid, kind, result.hash, metaJson, now);
+  stmts.updateBoardFields.run(
+    null, null, null, null, null, null, null, null, null, null, null, now, boardUid
+  );
+  stmts.updateProjectFields.run(null, null, null, null, null, now, projectId);
+
+  return {
+    hash: result.hash,
+    size: result.size,
+    kind,
+    boardUid,
+    mime: mime || 'application/octet-stream',
+  };
+}
+
+/**
+ * Look up a single asset for (boardUid, kind) → { hash, mime, size, meta }
+ * or null. Used by agent GET routes that want a direct asset lookup without
+ * going through the legacy filename parser.
+ */
+function getBoardAsset(projectId, boardUid, kind) {
+  const board = stmts.getBoard.get(boardUid);
+  if (!board || board.project_id !== projectId) return null;
+  const row = stmts.getAsset.get(boardUid, kind);
+  if (!row) return null;
+  return {
+    hash: row.blob_hash,
+    mime: row.mime_type,
+    size: row.byte_size,
+    kind: row.kind,
+    boardUid,
+    meta: row.meta ? safeParse(row.meta) : null,
+    updatedAt: row.updated_at,
+  };
+}
+
 // ── legacy path helpers (kept for backwards compat) ────────────────────
 
 function getProjectDir(id) {
@@ -827,6 +918,7 @@ module.exports = {
   updateProject,
   deleteProject,
   listProjects,
+  listProjectsByOwner,
   addBoard,
   updateBoard,
   deleteBoard,
@@ -844,6 +936,10 @@ module.exports = {
   storeLegacyAsset,
   parseLegacyFilename,
   legacyFilenameFor,
+
+  // Direct asset access for agent routes
+  storeBoardAsset,
+  getBoardAsset,
 
   // project.storyboarder JSON ↔ SQLite sync
   syncFromProjectFile,

@@ -126,6 +126,13 @@ app.get('/web/projects/:uuid/images/:filename', (req, res) => {
   return res.sendFile(fp);
 });
 
+// Public read-only storyboard viewer. Mounted BEFORE the SPA catchall so
+// /view/<uuid> is served as a dedicated HTML page instead of returning
+// the editor shell. The agent-auth middleware runs here so owners of
+// gated projects can still access their own work via bearer token.
+const viewRouter = require('./routes/view');
+app.use('/view', agentAuthMiddleware, viewRouter);
+
 // Anything else under /web/projects/:uuid that isn't an image goes through
 // the legacy /api/fs/read shim path, which now also routes through SQLite
 // for project assets and disk for everything else (project.storyboarder is
