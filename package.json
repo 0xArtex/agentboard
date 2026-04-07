@@ -36,8 +36,9 @@
     "build:server": "cd server && npm run build",
     "build": "npm-run-all build:*",
     "deploy:prod": "node ./scripts/deploy.js",
-    "build:web": "NODE_OPTIONS=--openssl-legacy-provider webpack --mode=production --progress --config configs/web/webpack.config.js",
-    "dev:web": "NODE_OPTIONS=--openssl-legacy-provider webpack --mode=development --watch --progress --config configs/web/webpack.config.js"
+    "build:web": "cross-env NODE_OPTIONS=--openssl-legacy-provider webpack --mode=production --progress --config configs/web/webpack.config.js",
+    "dev:web": "cross-env NODE_OPTIONS=--openssl-legacy-provider webpack --mode=development --watch --progress --config configs/web/webpack.config.js",
+    "start:web": "node web-server/server.js"
   },
   "repository": {
     "type": "git",

@@ -335,6 +335,20 @@ const WavEncoder = require("wav-encoder")
 // states: initializing, stopped, recording, finalizing
 class Recorder {
   async initialize () {
+    // Browsers create the shared AudioContext in `suspended` state and refuse
+    // to start it until a user gesture explicitly resumes it. `initialize()`
+    // is invoked from a button-click handler, so this is the right place to
+    // unblock the context — without it, Tone.UserMedia.open() and the
+    // MediaRecorder pipeline silently fail to produce data on the web build.
+    try {
+      const ctx = Tone.context && (Tone.context.rawContext || Tone.context)
+      if (ctx && typeof ctx.resume === 'function' && ctx.state === 'suspended') {
+        await ctx.resume()
+      }
+    } catch (err) {
+      console.warn('Recorder.initialize: AudioContext.resume() failed', err)
+    }
+
     // FOR TROUBLESHOOTING AUDIO ISSUES
     // list out the audio devices to the console
     // throw a more helpful error if 'default' audio device cannot be found

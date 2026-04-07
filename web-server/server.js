@@ -84,17 +84,43 @@ app.use('/node_modules', express.static(path.join(REPO_ROOT, 'node_modules')));
 // Also serve web-server/data for project files accessible via /data/
 app.use('/server-data', express.static(DATA_DIR));
 
-// Serve project files directly at /web/projects/<uuid>/* → web-server/data/projects/<uuid>/*
-// Used for image loading via Image() that bypasses the fs shim
-app.use('/web/projects/:uuid', (req, res, next) => {
-  const uuid = req.params.uuid;
-  // Validate UUID format to prevent traversal
-  if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(uuid)) {
+// Serve project asset images at /web/projects/<uuid>/images/<filename>.
+//
+// This is the URL the browser hits when main-window.js does
+//   new Image().src = '/web/projects/<uuid>/images/board-1-ABCDE-fill.png?<mtime>'
+// for layer + posterframe + thumbnail loads. We translate the legacy
+// filename through the project-store, look up the current blob hash for
+// that (board, kind), and stream the bytes from the BlobStore.
+const projectStore = require('./services/project-store');
+const { blobStore } = require('./services/blob-store');
+const PROJECT_UUID_RE = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
+
+app.get('/web/projects/:uuid/images/:filename', (req, res) => {
+  const { uuid, filename } = req.params;
+  if (!PROJECT_UUID_RE.test(uuid)) {
     return res.status(400).send('Invalid project id');
   }
-  const projectDir = path.join(DATA_DIR, 'projects', uuid);
-  express.static(projectDir, { index: false, fallthrough: true })(req, res, next);
+  const asset = projectStore.resolveLegacyAsset(uuid, filename);
+  if (!asset) {
+    return res.status(404).send('Asset not found');
+  }
+  const fp = blobStore.pathOf(asset.hash);
+  if (!fp) {
+    return res.status(404).send('Blob missing on disk');
+  }
+  res.type(asset.mime || 'application/octet-stream');
+  // Long-cache: blob URLs are content-addressed by the (uid, kind) lookup
+  // and the cachebuster querystring rotates whenever the underlying hash
+  // changes, so we can let browsers hold these for a while.
+  res.setHeader('Cache-Control', 'public, max-age=300');
+  return res.sendFile(fp);
 });
+
+// Anything else under /web/projects/:uuid that isn't an image goes through
+// the legacy /api/fs/read shim path, which now also routes through SQLite
+// for project assets and disk for everything else (project.storyboarder is
+// served via /api/projects/:id and cached client-side, so this fallback is
+// rarely hit but kept for completeness).
 
 // ── Root route: serve the web app HTML ──
 app.get('/', (req, res) => {
@@ -126,58 +152,54 @@ app.get('*', (req, res, next) => {
 // ── Error handler (must be last) ──
 app.use(errorHandler);
 
+// ── Seed optional userData files so first-load reads don't 404 ──
+//
+// The desktop app stores small bits of state under app.getPath('userData').
+// Our virtual /web/userData mount maps to web-server/data, so on a fresh
+// install these files don't exist and the client logs noisy 404s for things
+// that are perfectly fine to be empty (e.g. the pomodoro recordings list).
+// Pre-creating them with sane empty defaults keeps the network panel clean
+// without papering over genuine read failures elsewhere.
+async function ensureUserDataDefaults() {
+  const defaults = [
+    { relPath: 'recordings.json', body: [] },
+  ];
+  for (const { relPath, body } of defaults) {
+    const fp = path.join(DATA_DIR, relPath);
+    if (!(await fs.pathExists(fp))) {
+      await fs.ensureDir(path.dirname(fp));
+      await fs.writeJson(fp, body, { spaces: 2 });
+    }
+  }
+}
+
 // ── Create default project on startup if none exist ──
 async function ensureDefaultProject() {
   const store = require('./services/project-store');
   const projects = await store.listProjects();
   if (projects.length === 0) {
     console.log('📋 No projects found, creating default project...');
-    const { id, project } = await store.createProject({
+    const { id } = await store.createProject({
       aspectRatio: 1.7777,
       fps: 24,
       defaultBoardTiming: 2000,
     });
-    // Add one blank board with a pre-existing fill layer (skip migration)
-    await store.addBoard(id, {
+
+    // Pre-name the fill layer so addBoard's blank-PNG synthesis writes it.
+    // The filename format `board-<num>-<uid>-fill.png` is what
+    // boardModel.boardFilenameForLayer expects when the renderer asks for the
+    // fill layer.
+    const uid = store.generateBoardUid();
+    const board = await store.addBoard(id, {
+      uid,
       dialogue: '',
       action: '',
       notes: '',
       layers: {
-        fill: {
-          url: '' // filled in below
-        }
-      }
+        fill: { url: `board-1-${uid}-fill.png` },
+      },
     });
-    console.log(`📋 Created default project: ${id}`);
-    
-    // Create a blank PNG for the board's fill layer
-    const imgDir = store.getImagesDir(id);
-    const updatedProject = await store.getProject(id);
-    if (updatedProject && updatedProject.project.boards.length > 0) {
-      const board = updatedProject.project.boards[0];
-      const uid = board.uid;
-      const boardNum = board.number;
-      // fill layer filename format: board-<num>-<uid>-fill.png
-      const fillFilename = `board-${boardNum}-${uid}-fill.png`;
-      // Minimal blank 1920x1080 PNG (but 1x1 transparent works too for bootstrap)
-      const minPng = Buffer.from(
-        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVQI12NgAAIABQAB' +
-        'Nl7BcQAAAABJRU5ErkJggg==', 'base64'
-      );
-      await fs.writeFile(path.join(imgDir, fillFilename), minPng);
-      // Update board.layers.fill.url with the real filename
-      board.layers = board.layers || {};
-      board.layers.fill = { url: fillFilename };
-      // DO NOT create board.url image — that's what triggers migration
-      // Delete board.url so existsSync returns false and migration is skipped
-      // Actually we need board.url for other things, just don't create the file
-      // Also remove the board.url file if it was created
-      if (await fs.pathExists(path.join(imgDir, board.url))) {
-        await fs.remove(path.join(imgDir, board.url));
-      }
-      // Save the updated project
-      await store.updateProject(id, { boards: updatedProject.project.boards });
-    }
+    console.log(`📋 Created default project: ${id} (board uid=${board.uid})`);
   }
 }
 
@@ -189,6 +211,7 @@ server.listen(PORT, async () => {
   console.log(`   Health:    http://localhost:${PORT}/api/health`);
   console.log(`   Web App:   http://localhost:${PORT}/\n`);
   
+  await ensureUserDataDefaults();
   await ensureDefaultProject();
 });
 

@@ -50,3 +50,16 @@ src/build
 
 .env
 *.env
+
+# Local-only notes (internal TODOs, deploy checklists, scratch files)
+# Anything matching *.local.md is treated as personal and never committed.
+*.local.md
+NOTES.local.md
+
+# SQLite databases + WAL files
+web-server/data/*.db
+web-server/data/*.db-wal
+web-server/data/*.db-shm
+
+# Local blob store (content-addressed PNGs)
+web-server/data/blobs/

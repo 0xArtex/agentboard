@@ -107,31 +107,36 @@ async function prefetchBoardFile (sharedObj) {
     return
   }
 
-  // Pre-fetch referenced board images so readFileSync hits cache
+  // Warm the shim's existsSync cache with EVERY asset filename the server
+  // currently has for this project. main-window.js's verifyScene() does
+  // synchronous fs.existsSync() checks against these filenames; without
+  // pre-warming, the cache is empty on every page load, verifyScene reports
+  // every layer as "missing", and writes blank placeholders that destroy
+  // the user's drawings. This single fetch fixes the refresh-loses-work bug
+  // root cause.
+  //
+  // We don't fetch the actual bytes — just register the path as "exists".
+  // The browser will fetch the real bytes on demand when main-window.js
+  // sets an Image().src to the same URL.
   const boardPath = sharedObj.boardPath
-  const boards = Array.isArray(projectJson.boards) ? projectJson.boards : []
-  await Promise.all(boards.map(async (board) => {
-    const urls = new Set()
-    if (board.url) urls.add(board.url)
-    if (board.layers) {
-      for (const k of Object.keys(board.layers)) {
-        if (board.layers[k] && board.layers[k].url) urls.add(board.layers[k].url)
-      }
-    }
-    for (const filename of urls) {
-      const filePath = `${boardPath}/images/${filename}`
-      try {
-        const res = await window.fetch(
-          `${API_BASE}/fs/read?path=${encodeURIComponent(filePath)}`
-        )
-        if (res.ok) {
-          const buf = await res.arrayBuffer()
-          const bytes = new Uint8Array(buf)
-          electronShim._cacheFile(filePath, bytes)
+  if (sharedObj.projectId) {
+    try {
+      const filesRes = await window.fetch(
+        `${API_BASE}/projects/${sharedObj.projectId}/files`
+      )
+      if (filesRes.ok) {
+        const { files } = await filesRes.json()
+        for (const file of files) {
+          // Marker bytes — we just need existsSync to return true. The actual
+          // image data is fetched by Image() through the static handler.
+          electronShim._cacheFile(`${boardPath}/images/${file.filename}`, new Uint8Array(0))
         }
-      } catch (e) { /* missing is fine */ }
+        console.log('[web-bootstrap] Warmed existsSync cache with', files.length, 'assets')
+      }
+    } catch (err) {
+      console.warn('[web-bootstrap] Could not prefetch project files:', err.message)
     }
-  }))
+  }
 }
 
 /**

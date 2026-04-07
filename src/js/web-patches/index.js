@@ -31,6 +31,7 @@ const applyI18nextPatch = require('./i18next-patch')
 // Phase 2: Async patches (data fetching)
 const applySketchPanePatch = require('./sketch-pane-patch')
 const applyAlchemancyPatch = require('./alchemancy-patch')
+const applyAudioContextPatch = require('./audio-context-patch')
 
 /**
  * Apply all patches. Returns a promise for async patches.
@@ -51,6 +52,11 @@ async function applyAllPatches () {
 
   // Alchemancy runtime guards (cursor + pixelsToCanvas)
   applyAlchemancyPatch()
+
+  // Install one-shot gesture listener that resumes Tone.js's AudioContext
+  // the first time the user clicks or types. Browsers block playback until
+  // a user gesture; this unlocks both sfx and any future Tone consumers.
+  applyAudioContextPatch()
 
   console.log('[web-patches] All patches applied')
 }

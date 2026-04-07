@@ -86,32 +86,71 @@ module.exports = function applyAlchemancyPatch () {
   }
 
   // --- 2. Util.pixelsToCanvas defensive wrap ---
+  //
+  // Guards against two failure modes:
+  //
+  //  1. width/height being zero or negative — the original would crash in
+  //     createImageData on the empty default board.
+  //
+  //  2. pixel buffer length disagreeing with width*height*4. Storyboarder's
+  //     boardFileImageSize returns [900 * aspectRatio, 900] which, for the
+  //     default 1.7777 aspect, gives a fractional width of 1599.93. PIXI's
+  //     RenderTexture.create rounds *up* to 1600 for GPU alignment, so
+  //     extract.pixels yields a 1600×900 buffer (5,760,000 bytes) while a
+  //     naive floor(1599.93)*900*4 check computes 5,756,400 — off by one
+  //     row's worth of pixels. We used to treat that mismatch as corruption
+  //     and return a blank canvas, which silently destroyed every drawing
+  //     the user made.
+  //
+  //     Fix: trust the buffer. Height is always an integer (900), so the
+  //     actual width is just `pixels.length / (height * 4)`. Use that to
+  //     delegate to the original with dimensions that *match* the data PIXI
+  //     handed us, regardless of how the caller rounded. If the derived
+  //     width doesn't come out as a clean integer then the buffer really is
+  //     malformed and we fall back to a blank.
   try {
     const Util = alch.util
     if (Util && Util.pixelsToCanvas) {
       const orig = Util.pixelsToCanvas
       Util.pixelsToCanvas = function (pixels, width, height) {
+        let w = Math.max(0, Math.round(width || 0))
+        let h = Math.max(0, Math.round(height || 0))
         try {
-          if (!width || !height || width <= 0 || height <= 0) {
+          if (w <= 0 || h <= 0) {
             const c = document.createElement('canvas')
-            c.width = Math.max(1, width | 0)
-            c.height = Math.max(1, height | 0)
+            c.width = Math.max(1, w)
+            c.height = Math.max(1, h)
             return c
           }
-          const expected = width * height * 4
-          if (pixels && pixels.length && pixels.length !== expected) {
-            // mismatched buffer — return blank canvas rather than crashing
-            const c = document.createElement('canvas')
-            c.width = width
-            c.height = height
-            return c
+
+          // Reconcile dimensions with the actual pixel buffer PIXI produced.
+          if (pixels && pixels.length) {
+            const expected = w * h * 4
+            if (pixels.length !== expected) {
+              // Try to derive width from the buffer assuming height is right.
+              const derivedW = pixels.length / (h * 4)
+              if (Number.isInteger(derivedW) && derivedW > 0) {
+                w = derivedW
+              } else {
+                console.warn(
+                  '[web-patches/alchemancy] pixelsToCanvas buffer size unrecoverable',
+                  'expected', expected, 'got', pixels.length,
+                  'for nominal', w + 'x' + h
+                )
+                const c = document.createElement('canvas')
+                c.width = w
+                c.height = h
+                return c
+              }
+            }
           }
-          return orig.call(this, pixels, width, height)
+
+          return orig.call(this, pixels, w, h)
         } catch (err) {
           console.warn('[web-patches/alchemancy] pixelsToCanvas swallowed:', err.message)
           const c = document.createElement('canvas')
-          c.width = Math.max(1, width | 0)
-          c.height = Math.max(1, height | 0)
+          c.width = Math.max(1, w)
+          c.height = Math.max(1, h)
           return c
         }
       }

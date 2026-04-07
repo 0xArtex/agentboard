@@ -229,6 +229,23 @@ const store = configureStore()
 window.$r = { store } // for debugging, e.g.: $r.store.getStore()
 const isCommandPressed = createIsCommandPressed(store)
 
+// True when running inside the browser (web-server build) rather than the
+// desktop Electron shell. web-bootstrap.js sets window.__sharedObj before
+// loading main-window.js, so its presence is the cleanest one-shot signal.
+// Used by export handlers below to gate features that depend on Node-only
+// libraries (ffmpeg, gifencoder, archiver, pdfkit) or Electron-only APIs
+// (BrowserWindow, shell.showItemInFolder).
+const isWebBuild = () => typeof window !== 'undefined' && !!window.__sharedObj
+const notSupportedInWebBuild = (featureName) => {
+  notifications.notify({
+    message:
+      `${featureName} isn’t available in the web build yet. ` +
+      `It needs server-side rendering — tracked for Phase 3.`,
+    timing: 10
+  })
+  log.warn(`[web build] ${featureName} blocked — Node/Electron-only deps`)
+}
+
 const prefsModule = remote.require('./prefs')
 prefsModule.init(path.join(app.getPath('userData'), 'pref.json'))
 // we're gradually migrating prefs to a reducer
@@ -2404,10 +2421,18 @@ const updateAudioDurations = () => {
   }
 }
 
+// Debounce for the project.storyboarder metadata write. The original
+// desktop Storyboarder used 5000ms here because it was tuned for writing
+// to spinning disks and wanted to coalesce aggressively. On the web we
+// hit a sub-millisecond SQLite write and the 5s timer just feels like
+// "the app is ignoring me" after a reorder or delete. 500ms is short
+// enough to feel instant but still coalesces rapid edits (e.g. typing
+// in the dialogue field resets the timer on each keystroke, so we only
+// actually save once the user pauses).
 let markBoardFileDirty = () => {
   boardFileDirty = true
   clearTimeout(boardFileDirtyTimer)
-  boardFileDirtyTimer = setTimeout(saveBoardFile, 5000)
+  boardFileDirtyTimer = setTimeout(saveBoardFile, 500)
 }
 
 let saveBoardFile = (opt = { force: false }) => {
@@ -2415,8 +2440,8 @@ let saveBoardFile = (opt = { force: false }) => {
   //
   // are we still drawing?
   if (storyboarderSketchPane.getIsDrawingOrStabilizing()) {
-    // wait, then retry
-    boardFileDirtyTimer = setTimeout(saveBoardFile, 5000)
+    // wait, then retry — matches the markBoardFileDirty 500ms cadence
+    boardFileDirtyTimer = setTimeout(saveBoardFile, 500)
     return
   }
 
@@ -2442,12 +2467,19 @@ let saveBoardFile = (opt = { force: false }) => {
   }
 }
 
+// Debounce for the layer PNG writes. Kept longer than the board-file
+// debounce because each stroke can be a few hundred KB of PNG bytes and
+// we don't want to re-encode the whole layer on every pointer-up. 1500ms
+// catches the "finished drawing a shape" moment while still feeling
+// responsive — drawings typically persist within ~2 seconds of the last
+// stroke, and an explicit board switch forces an immediate save via
+// saveImageFile() regardless of this timer.
 let markImageFileDirty = layerIndices => {
   // force update layers dirty flag
   storyboarderSketchPane.markLayersDirty(layerIndices)
 
   clearTimeout(imageFileDirtyTimer)
-  imageFileDirtyTimer = setTimeout(saveImageFile, 5000)
+  imageFileDirtyTimer = setTimeout(saveImageFile, 1500)
 }
 
 const addToLineMileage = value => {
@@ -2506,6 +2538,13 @@ let saveDataURLtoFile = (dataURL, filename) => {
 // this function saves only the CURRENT board
 // call it before changing boards to ensure the current work is saved
 //
+// Tracks consecutive "still drawing" deferrals so we don't retry forever when
+// modeStatus gets stuck (e.g. a stroke that never completed cleanly). After
+// the bound, we drop the busy flag and proceed with the save instead of
+// looping with the "Still drawing" warning indefinitely.
+let saveImageFileRetryCount = 0
+const SAVE_IMAGE_FILE_MAX_RETRIES = 3
+
 let saveImageFile = async () => {
   log.info('main-window#saveImageFile')
 
@@ -2515,12 +2554,30 @@ let saveImageFile = async () => {
 
   // are we still drawing?
   if (storyboarderSketchPane.getIsDrawingOrStabilizing()) {
-    // wait, then retry
-    log.warn('Still drawing. Not ready to save yet. Retry in 5s')
-    imageFileDirtyTimer = setTimeout(saveImageFile, 5000)
-    isSavingImageFile = false
-    return
+    if (saveImageFileRetryCount < SAVE_IMAGE_FILE_MAX_RETRIES) {
+      saveImageFileRetryCount++
+      log.warn(
+        `Still drawing. Not ready to save yet. Retry in 1.5s ` +
+        `(${saveImageFileRetryCount}/${SAVE_IMAGE_FILE_MAX_RETRIES})`
+      )
+      imageFileDirtyTimer = setTimeout(saveImageFile, 1500)
+      isSavingImageFile = false
+      return
+    }
+    // Safety net: the busy flag has been stuck across multiple retries.
+    // Force it back to idle and continue saving so the user's work doesn't
+    // hang in limbo forever.
+    log.warn(
+      'Still drawing flag stuck across ' + SAVE_IMAGE_FILE_MAX_RETRIES +
+      ' retries — forcing modeStatus back to idle and saving anyway.'
+    )
+    store.dispatch({
+      type: 'TOOLBAR_MODE_STATUS_SET',
+      payload: 'idle',
+      meta: { scope: 'local' }
+    })
   }
+  saveImageFileRetryCount = 0
 
   const imagesPath = path.join(boardPath, 'images')
 
@@ -6912,11 +6969,18 @@ ipcRenderer.on('showTip', (event, args) => {
 })
 
 ipcRenderer.on('exportAnimatedGif', (event, args) => {
+  // gifencoder uses Node streams (createReadStream/createWriteStream) which
+  // can't be polyfilled cleanly in the browser — defer to Phase 3.
+  if (isWebBuild()) return notSupportedInWebBuild('Animated GIF export')
   exportAnimatedGif()
   ipcRenderer.send('analyticsEvent', 'Board', 'exportAnimatedGif')
 })
 
 ipcRenderer.on('exportFcp', (event, args) => {
+  // FCP/Premiere XML generation is pure JS, but the export also fs.copySync's
+  // audio files and tries shell.showItemInFolder afterwards — both no-ops in
+  // the web shim. Gate until the Phase 3 server-side path lands.
+  if (isWebBuild()) return notSupportedInWebBuild('Final Cut Pro / Premiere export')
   exportFcp()
   ipcRenderer.send('analyticsEvent', 'Board', 'exportFcp')
 })
@@ -6932,12 +6996,20 @@ ipcRenderer.on('exportCleanup', (event, args) => {
 })
 
 ipcRenderer.on('exportVideo', (event, args) => {
+  // exporters/ffmpeg.js spawns the ffmpeg binary via child_process — there's
+  // no browser equivalent. The eventual web path will route through the
+  // server's /api/agent/* and a server-side ffmpeg.
+  if (isWebBuild()) return notSupportedInWebBuild('Video export')
   exportVideo()
   ipcRenderer.send('analyticsEvent', 'Board', 'exportVideo')
 })
 
 
 ipcRenderer.on('exportPrintableWorksheetPdf', (event, sourcePath) => {
+  if (isWebBuild()) {
+    notSupportedInWebBuild('Printable worksheet PDF export')
+    return
+  }
   let filename = 'Worksheet'
 
   let outputPath = path.join(
@@ -7014,9 +7086,21 @@ ipcRenderer.on('save', (event, args) => {
 
 ipcRenderer.on('saveAs', (event, args) => saveAsFolder())
 
-ipcRenderer.on('exportWeb', (event, args) => exportWeb())
+ipcRenderer.on('exportWeb', (event, args) => {
+  // exportWeb opens an Electron BrowserWindow for storyboarders.com sign-in
+  // and uploads via request-promise-native — both Node/Electron-only.
+  if (isWebBuild()) return notSupportedInWebBuild('Upload to storyboarders.com')
+  exportWeb()
+})
 
-ipcRenderer.on('exportZIP', (event, args) => exportZIP())
+ipcRenderer.on('exportZIP', (event, args) => {
+  // exporters/archive.js streams a zip via the `archiver` package and
+  // fs.createWriteStream — Node-only. The server has a working
+  // /api/projects/:id/export/zip route already; future Phase 3 work should
+  // route the menu action there and trigger a browser download.
+  if (isWebBuild()) return notSupportedInWebBuild('ZIP export')
+  exportZIP()
+})
 
 ipcRenderer.on('reloadScript', (event, args) => reloadScript(args))
 

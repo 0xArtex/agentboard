@@ -56,6 +56,28 @@ router.delete('/:id', asyncHandler(async (req, res) => {
 
 // ── Board routes ──
 
+// GET /api/projects/:id/files — List every legacy-filename asset that exists
+//
+// Used by the web-bootstrap to prefetch the existsSync cache. Without this,
+// verifyScene() in main-window.js asks the in-memory shim cache "do these
+// files exist" on every page load, gets a false negative because the cache
+// is empty, and overwrites real layer PNGs with blank placeholders. This
+// endpoint returns the canonical list so the bootstrap can warm the cache.
+router.get('/:id/files', asyncHandler(async (req, res) => {
+  const result = await store.getProject(req.params.id);
+  if (!result) return res.status(404).json({ error: { message: 'Project not found' } });
+  const assets = store.listBoardAssets(req.params.id);
+  res.json({
+    files: assets.map(a => ({
+      filename: a.filename,
+      kind: a.kind,
+      size: a.size,
+      mime: a.mime,
+      updatedAt: a.updatedAt,
+    })),
+  });
+}));
+
 // GET /api/projects/:id/boards — List all boards
 router.get('/:id/boards', asyncHandler(async (req, res) => {
   const result = await store.getProject(req.params.id);

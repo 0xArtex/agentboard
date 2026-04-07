@@ -17,11 +17,31 @@ const API_BASE = '/api'
 // Pre-loaded file cache (populated by web-preload.js)
 // ============================================================
 const preloadedFiles = new Map()
+// Per-file modification times (ms since epoch). Used by statSync().mtimeMs
+// so that cachebuster URLs (e.g. `image.png?<mtimeMs>`) only change when the
+// file is actually written. Without this, statSync().mtimeMs is `undefined`
+// and image src ends up as `image.png?undefined`, which the browser caches
+// forever — causing saved drawings to never refresh.
+const fileMtimes = new Map()
 const cachedPrefs = {}
+
+function _normalizePath(p) {
+  return typeof p === 'string' ? p.replace(/\\/g, '/') : p
+}
+function _touch(filePath) {
+  const now = Date.now()
+  fileMtimes.set(filePath, now)
+  const norm = _normalizePath(filePath)
+  if (norm !== filePath) fileMtimes.set(norm, now)
+}
+function _getMtime(filePath) {
+  return fileMtimes.get(filePath) || fileMtimes.get(_normalizePath(filePath)) || 0
+}
 
 // Public API to populate the cache from web-preload
 function _cacheFile(filePath, content) {
   preloadedFiles.set(filePath, content)
+  _touch(filePath)
 }
 function _cachePrefs(prefs) {
   Object.assign(cachedPrefs, prefs)
@@ -537,13 +557,36 @@ const fsShim = {
     } catch (e) {
       console.warn('[electron-shim] writeFileSync encode error:', e)
     }
-    fetch(`${API_BASE}/fs/write?path=${encodeURIComponent(filePath)}`, {
-      method: 'POST',
-      headers: { 'Content-Type': contentType },
-      body,
-    }).catch(err => console.warn('[electron-shim] writeFileSync async failed:', err))
+
+    // Use a SYNCHRONOUS XHR. Node's fs.writeFileSync contract is "block until
+    // the data is on disk", and the only browser primitive that lets us
+    // honour that is sync XHR. We previously used fire-and-forget fetch(),
+    // but that produced a race: the caller would immediately request the
+    // file's URL via Image() and the GET would beat the POST to the server,
+    // surfacing as `net::ERR_CONTENT_LENGTH_MISMATCH` on partially-written
+    // images (notably board thumbnails after a save).
+    //
+    // Modern browsers print a deprecation warning for sync XHR on the main
+    // thread. That warning is acceptable here — we're explicitly shimming a
+    // sync filesystem API, the writes are tiny (a few KB), and they happen
+    // over loopback so the block is sub-millisecond.
+    try {
+      const xhr = new XMLHttpRequest()
+      xhr.open('POST', `${API_BASE}/fs/write?path=${encodeURIComponent(filePath)}`, false)
+      xhr.setRequestHeader('Content-Type', contentType)
+      xhr.send(body)
+      if (xhr.status < 200 || xhr.status >= 300) {
+        console.warn(
+          `[electron-shim] writeFileSync HTTP ${xhr.status} for ${filePath}`
+        )
+      }
+    } catch (err) {
+      console.warn('[electron-shim] writeFileSync sync XHR failed:', err)
+    }
+
     // Cache locally (store original form for readback)
     preloadedFiles.set(filePath, data)
+    _touch(filePath)
   },
 
   existsSync: function(filePath) {
@@ -580,15 +623,30 @@ const fsShim = {
 
   statSync: function(filePath) {
     const exists = fsShim.existsSync(filePath)
+    if (!exists) {
+      // Match Node's behaviour: throw ENOENT so callers like cacheKey() can
+      // fall back to their `catch` branch. Otherwise mtimeMs would be 0 and
+      // cachebuster URLs would never refresh for newly-created files.
+      const err = new Error(`ENOENT: no such file or directory, stat '${filePath}'`)
+      err.code = 'ENOENT'
+      throw err
+    }
+    const ms = _getMtime(filePath) || Date.now()
+    const d = new Date(ms)
+    const size = (preloadedFiles.get(filePath) || preloadedFiles.get(_normalizePath(filePath)) || '').length || 0
     return {
       isDirectory: () => false,
-      isFile: () => exists,
+      isFile: () => true,
       isSymbolicLink: () => false,
-      size: exists ? (preloadedFiles.get(filePath) || '').length : 0,
-      mtime: new Date(),
-      ctime: new Date(),
-      atime: new Date(),
-      birthtime: new Date(),
+      size,
+      mtime: d,
+      ctime: d,
+      atime: d,
+      birthtime: d,
+      mtimeMs: ms,
+      ctimeMs: ms,
+      atimeMs: ms,
+      birthtimeMs: ms,
     }
   },
 
@@ -601,6 +659,8 @@ const fsShim = {
 
   unlinkSync: function(filePath) {
     preloadedFiles.delete(filePath)
+    fileMtimes.delete(filePath)
+    fileMtimes.delete(_normalizePath(filePath))
     fetch(`${API_BASE}/fs/delete?path=${encodeURIComponent(filePath)}`, { method: 'DELETE' })
       .catch(() => {})
   },
@@ -609,11 +669,34 @@ const fsShim = {
     if (cb) cb(null)
   },
 
-  renameSync: function() {},
-  rename: function(oldP, newP, cb) { if (cb) cb(null) },
+  // rename/move are no-ops on the server (all files are either content-
+  // addressed blobs or SQLite rows) but we DO move the local in-memory
+  // cache entry so that subsequent readFileSync on the new path finds the
+  // data. Critical for saveBoardFile's atomic-rename pattern:
+  //   writeFileSync(backup, json) + moveSync(backup, real)
+  // without this, a later readFileSync(real) would miss the cache.
+  renameSync: function(oldP, newP) {
+    if (preloadedFiles.has(oldP)) {
+      preloadedFiles.set(newP, preloadedFiles.get(oldP))
+      preloadedFiles.delete(oldP)
+      _touch(newP)
+    }
+  },
+  rename: function(oldP, newP, cb) {
+    fsShim.renameSync(oldP, newP)
+    if (cb) cb(null)
+  },
 
-  copyFileSync: function() {},
-  copyFile: function(src, dest, cb) { if (cb) cb(null) },
+  copyFileSync: function(src, dest) {
+    if (preloadedFiles.has(src)) {
+      preloadedFiles.set(dest, preloadedFiles.get(src))
+      _touch(dest)
+    }
+  },
+  copyFile: function(src, dest, cb) {
+    fsShim.copyFileSync(src, dest)
+    if (cb) cb(null)
+  },
 
   createReadStream: function(filePath) {
     // Return a minimal EventEmitter-like object
@@ -666,10 +749,10 @@ const fsShim = {
     }
   },
   ensureFile: function(p, cb) { fsShim.ensureFileSync(p); if (cb) cb(null) },
-  copySync: function() {},
-  copy: function(src, dest, cb) { if (cb) cb(null) },
-  moveSync: function() {},
-  move: function(src, dest, cb) { if (cb) cb(null) },
+  copySync: function(src, dest) { fsShim.copyFileSync(src, dest) },
+  copy: function(src, dest, cb) { fsShim.copyFileSync(src, dest); if (cb) cb(null) },
+  moveSync: function(src, dest) { fsShim.renameSync(src, dest) },
+  move: function(src, dest, cb) { fsShim.renameSync(src, dest); if (cb) cb(null) },
   removeSync: function(p) { preloadedFiles.delete(p) },
   remove: function(p, cb) { fsShim.removeSync(p); if (cb) cb(null) },
   emptyDirSync: function() {},

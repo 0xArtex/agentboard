@@ -17,7 +17,12 @@ class PomodorTimerView extends EventEmitter {
     this.innerEl = null
     this.minutesInput = null
 
-    this.pomodoroTimerMinutes = prefsModule.getPrefs('main')['pomodoroTimerMinutes']
+    // Default to 25 (the classic Pomodoro length) when the pref is missing.
+    // The web build's prefs are populated lazily and don't ship this key by
+    // default, which used to leak the literal string "undefined" into the
+    // <input type="number"> below — the browser then warned
+    // 'The specified value "undefined" cannot be parsed, or is out of range'.
+    this.pomodoroTimerMinutes = prefsModule.getPrefs('main')['pomodoroTimerMinutes'] || 25
 
     this.pomodoroTimer = new PomodoroTimer()
     this.pomodoroTimer.on('update', (data)=>{

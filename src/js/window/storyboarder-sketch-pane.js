@@ -229,10 +229,24 @@ class StoryboarderSketchPane extends EventEmitter {
   }
 
   setStrategy (strategy) {
-    if (this.strategy) this.strategy.shutdown()
+    // Re-entrance guard. A strategy's shutdown() may dispatch Redux actions
+    // (e.g. TOOLBAR_MODE_STATUS_SET: idle) that trigger observeStore →
+    // syncSketchPaneState → setStrategy on the SAME pane — and because
+    // `this.strategy` hasn't been reassigned yet at that point, the nested
+    // call would re-shutdown the already-shutting-down strategy, infinite-
+    // loop into a stack overflow, and corrupt PIXI's scene graph on the way
+    // down. Guarding here makes every strategy shutdown path safe without
+    // requiring each shutdown() to reason about re-entrance itself.
+    if (this._settingStrategy) return
+    this._settingStrategy = true
+    try {
+      if (this.strategy) this.strategy.shutdown()
 
-    this.strategy = this.strategies[strategy]
-    this.strategy.startup()
+      this.strategy = this.strategies[strategy]
+      this.strategy.startup()
+    } finally {
+      this._settingStrategy = false
+    }
   }
 
   setIsLocked (shouldLock) {
@@ -741,11 +755,21 @@ class DrawingStrategy {
     this.context.sketchPaneDOMElement.addEventListener('wheel', this._onWheel, { passive: true })
   }
   shutdown () {
-    // if we ever needed to shutdown DURING drawing, this would be useful
-    // if (this.context.sketchPane.isDrawing()) {
-    //   this.context.sketchPane.stopDrawing()
-    //   this.context.store.dispatch({ type: 'TOOLBAR_MODE_STATUS_SET', payload: 'idle', meta: { scope: 'local' } })
-    // }
+    // If the strategy is swapped out mid-drag (e.g. the user switches tool
+    // before lifting the pointer, or the window loses focus), the pointerup
+    // listener gets removed before it fires. That leaves modeStatus stuck on
+    // 'busy', which makes getIsDrawingOrStabilizing() return true forever and
+    // saveImageFile() loops on "Still drawing. Not ready to save yet". Force
+    // the in-flight stroke to end here, and only flip modeStatus back to
+    // idle when it is *actually* stuck busy — an unconditional dispatch
+    // creates a new state.toolbar reference on every shutdown, triggers
+    // observeStore, and lands in setStrategy reentrancy on board-load paths.
+    if (this.context.sketchPane.isDrawing()) {
+      this.context.sketchPane.stopDrawing()
+    }
+    if (this.context.store.getState().toolbar.modeStatus === 'busy') {
+      this.context.store.dispatch({ type: 'TOOLBAR_MODE_STATUS_SET', payload: 'idle', meta: { scope: 'local' } })
+    }
 
     this.context.sketchPaneDOMElement.removeEventListener('pointerover', this._onPointerOver)
     this.context.sketchPaneDOMElement.removeEventListener('pointerout', this._onPointerOut)

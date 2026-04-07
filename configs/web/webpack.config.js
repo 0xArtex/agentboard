@@ -102,7 +102,27 @@ module.exports = {
       'net': noopShim,
       'tls': noopShim,
       'dns': noopShim,
-      'spawn-sync': noopShim
+      'spawn-sync': noopShim,
+
+      // The legacy `request` family is only reached from
+      //   src/js/exporters/web.js  (storyboarders.com upload)
+      //   src/js/windows/upload.js (desktop upload window)
+      // The first is `require`d unconditionally at the top of main-window.js
+      // even though the IPC handler that calls it is gated by isWebBuild().
+      // Aliasing the package names to a noop drops ~13 transitive CVEs from
+      // the web bundle (request → har-validator → ajv-old → hawk → hoek →
+      // boom → cryptiles → sntp → form-data-old → tough-cookie-old → qs-old)
+      // without touching any application code.
+      'request': noopShim,
+      'request-promise-native': noopShim,
+      'request-promise-core': noopShim,
+
+      // jsonwebtoken is only used by the desktop license/registration/auth
+      // paths (src/js/main.js, models/license.js, shared/store/authStorage.js,
+      // windows/registration, windows/preferences/editor) — none of which are
+      // imported by the web entry tree. Alias to noop as belt-and-suspenders
+      // so any future stray import doesn't silently re-introduce its CVEs.
+      'jsonwebtoken': noopShim
     }
   },
   // Webpack 4 automatically polyfills buffer, stream, util, events, assert, process
