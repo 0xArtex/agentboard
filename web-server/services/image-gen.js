@@ -250,12 +250,14 @@ class FalAiImageGenProvider extends ImageGenProvider {
     const body = {
       prompt: cleaned,
       num_images: 1,
+      // Always set image_size — without it, kontext models default to the
+      // reference image's shape, which produces wrong-aspect-ratio outputs
+      // when the bundled refs and the target board don't match (and weird
+      // composite layouts when multiple refs of different shapes are sent).
+      // The route always supplies aspectRatio (falling back to the project's
+      // own aspectRatio), so this is reliably available.
+      image_size: falImageSize(aspectRatio),
     };
-    // image_size isn't accepted by every model (kontext variants infer from
-    // references), so only set it for classic models.
-    if (!FAL_MODELS_WITH_REFERENCES.has(modelKey)) {
-      body.image_size = falImageSize(aspectRatio);
-    }
     if (seed != null) body.seed = Number(seed);
     if (negativePrompt) body.negative_prompt = String(negativePrompt);
     if (steps != null) body.num_inference_steps = Number(steps);

@@ -197,8 +197,8 @@ function check(label, cond, extra) {
         post && Array.isArray(post.body.image_urls) && post.body.image_urls.length === 2);
       check('6d. image_urls are data URIs',
         post && post.body.image_urls[0].startsWith('data:image/png;base64,'));
-      check('6e. fal body DOES NOT include image_size (kontext infers)',
-        post && post.body.image_size === undefined);
+      check('6e. fal body INCLUDES image_size so kontext respects board aspect ratio',
+        post && post.body.image_size != null);
       check('6f. fal body has negative_prompt from style',
         post && typeof post.body.negative_prompt === 'string');
 
