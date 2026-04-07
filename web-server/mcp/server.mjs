@@ -463,18 +463,19 @@ server.registerTool(
   {
     title: 'Generate music with AI',
     description:
-      'Compose a piece of music for a board using ElevenLabs music compose. Best for ' +
+      'Compose a piece of music for a board using ElevenLabs /v1/music. Best for ' +
       'descriptive prompts like "melancholic lo-fi piano with soft kick drum, 70 bpm" ' +
       'or "epic orchestral cue, building tension, strings and timpani". Stored as ' +
       'audio:music by default (or audio:ambient if kind=ambient). Length is bounded ' +
-      '5-300 seconds. x402-gated in production. NOTE: requires beta access on ElevenLabs ' +
-      'plan — if your account does not have it, the call returns PROVIDER_REJECTED and ' +
-      'you should fall back to upload_audio with a pre-baked track.',
+      '3-600 seconds (3000-600000ms). Pass forceInstrumental=true if vocals are not ' +
+      'wanted. x402-gated in production.',
     inputSchema: {
       projectId: z.string(),
       boardUid: z.string(),
-      prompt: z.string().describe('Description of the desired music — instruments, mood, tempo, genre'),
-      musicLengthMs: z.number().optional().describe('Length in milliseconds (5000-300000, default 30000)'),
+      prompt: z.string().describe('Description of the desired music — instruments, mood, tempo, genre (≤4100 chars)'),
+      musicLengthMs: z.number().optional().describe('Length in milliseconds (3000-600000, default 30000)'),
+      modelId: z.string().optional().describe('ElevenLabs music model (default "music_v1")'),
+      forceInstrumental: z.boolean().optional().describe('If true, guarantees no vocals'),
       kind: z.string().optional().describe('music (default) | ambient'),
     },
   },

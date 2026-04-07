@@ -36,19 +36,19 @@ const MAX_TEXT_LEN = 5000;
 
 // Sound-effect prompts are short by nature ("thunderclap", "footsteps on
 // gravel"). Music prompts can be longer ("a melancholic lo-fi piano piece
-// over a soft kick drum"). We bound both to keep prompt-injection surface
-// small but allow enough description for quality.
+// over a soft kick drum"). The 4100 cap matches ElevenLabs' /v1/music
+// limit; SFX prompts are well under this in practice.
 const MIN_PROMPT_LEN = 1;
-const MAX_PROMPT_LEN = 2000;
+const MAX_PROMPT_LEN = 4100;
 
 // SFX duration bounds — match ElevenLabs sound-generation API limits.
 const MIN_SFX_DURATION_S = 0.5;
 const MAX_SFX_DURATION_S = 22;
 const DEFAULT_SFX_DURATION_S = 5;
 
-// Music duration bounds — ElevenLabs music compose accepts up to ~5 min.
-const MIN_MUSIC_LENGTH_MS = 5_000;
-const MAX_MUSIC_LENGTH_MS = 300_000;
+// Music duration bounds — match ElevenLabs /v1/music API: 3s to 10min.
+const MIN_MUSIC_LENGTH_MS = 3_000;
+const MAX_MUSIC_LENGTH_MS = 600_000;
 const DEFAULT_MUSIC_LENGTH_MS = 30_000;
 
 class TtsError extends Error {
@@ -455,15 +455,16 @@ class ElevenLabsTtsProvider extends TtsProvider {
     };
   }
 
-  // POST /v1/music/compose
-  // Body: { prompt, music_length_ms? }
-  // Returns audio/mpeg.
-  //
-  // The music compose endpoint may require beta access on your ElevenLabs
-  // plan. If your account doesn't have it the response is 403/404 and
-  // surfaces as PROVIDER_REJECTED — agents can fall back to a pre-baked
-  // music asset upload via /api/agent/upload-audio.
-  async generateMusic({ prompt, musicLengthMs }) {
+  // POST /v1/music
+  // Body: {
+  //   prompt: string (≤4100 chars),
+  //   music_length_ms?: int (3000-600000),
+  //   model_id?: 'music_v1',
+  //   force_instrumental?: bool,
+  // }
+  // Returns audio/mpeg. The 'song-id' response header carries an ID we
+  // log into providerMeta for later inpainting if the user enables it.
+  async generateMusic({ prompt, musicLengthMs, modelId, forceInstrumental }) {
     const cleaned = validatePrompt(prompt);
     const lengthMs = validateMusicLength(musicLengthMs);
 
@@ -471,8 +472,10 @@ class ElevenLabsTtsProvider extends TtsProvider {
       prompt: cleaned,
       music_length_ms: lengthMs,
     };
+    if (modelId) body.model_id = modelId;
+    if (forceInstrumental != null) body.force_instrumental = !!forceInstrumental;
 
-    const url = `${this.baseUrl}/v1/music/compose`;
+    const url = `${this.baseUrl}/v1/music`;
     const response = await this._withTimeout(
       fetch(url, {
         method: 'POST',
@@ -483,20 +486,21 @@ class ElevenLabsTtsProvider extends TtsProvider {
         },
         body: JSON.stringify(body),
       }),
-      'elevenlabs POST music/compose'
+      'elevenlabs POST music'
     );
 
     if (!response.ok) {
       const text = await response.text().catch(() => '');
       const code = response.status >= 500 ? 'PROVIDER_UNAVAILABLE' : 'PROVIDER_REJECTED';
       throw new TtsError(code,
-        `elevenlabs music/compose returned ${response.status}: ${text.slice(0, 500)}`,
+        `elevenlabs /v1/music returned ${response.status}: ${text.slice(0, 500)}`,
         { providerMeta: { status: response.status, body: text.slice(0, 500) } });
     }
 
     const arrayBuffer = await response.arrayBuffer();
     const bytes = Buffer.from(arrayBuffer);
     const mime = response.headers.get('content-type') || 'audio/mpeg';
+    const songId = response.headers.get('song-id') || null;
 
     return {
       bytes,
@@ -507,6 +511,9 @@ class ElevenLabsTtsProvider extends TtsProvider {
         kind: 'music',
         prompt: cleaned,
         musicLengthMs: lengthMs,
+        modelId: body.model_id || 'music_v1',
+        forceInstrumental: body.force_instrumental ?? false,
+        songId,
         byteSize: bytes.length,
       },
     };

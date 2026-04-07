@@ -858,19 +858,19 @@ router.post('/generate-sfx',
 //
 // POST /api/agent/generate-music
 // Body: {
-//   projectId:     string   (required, must be read-write)
-//   boardUid:      string   (required)
-//   prompt:        string   (required, 1-2000 chars — describes the music)
-//   musicLengthMs? number   (5000-300000, default 30000)
-//   kind?:         'music' | 'ambient' (default music)
+//   projectId:           string   (required, must be read-write)
+//   boardUid:            string   (required)
+//   prompt:              string   (required, 1-4100 chars — describes the music)
+//   musicLengthMs?:      number   (3000-600000, default 30000)
+//   modelId?:            string   (default 'music_v1')
+//   forceInstrumental?:  boolean  (true → guarantees no vocals)
+//   kind?:               'music' | 'ambient' (default music)
 // }
 //
 // Gated by x402 in prod (0.20 USDC default — music is heavier than SFX).
-// Generated audio stored as an audio:<kind> asset.
-//
-// NOTE: ElevenLabs music compose may require beta access. If your account
-// doesn't have it, the route returns 422 PROVIDER_REJECTED. Agents can
-// fall back to /api/agent/upload-audio with pre-baked music.
+// Generated audio stored as an audio:<kind> asset. Calls ElevenLabs
+// /v1/music which returns audio/mpeg + a song-id header that we persist
+// in providerMeta.
 //
 // Response 201: { hash, size, kind, boardUid, provider, prompt, durationMs }
 router.post('/generate-music',
@@ -896,6 +896,8 @@ router.post('/generate-music',
       result = await tts.generateMusic({
         prompt,
         musicLengthMs: body.musicLengthMs,
+        modelId: body.modelId,
+        forceInstrumental: body.forceInstrumental,
       });
     } catch (err) {
       if (req.x402Payment) req.x402Payment.markFailed(err);

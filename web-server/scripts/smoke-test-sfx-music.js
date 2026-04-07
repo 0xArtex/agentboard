@@ -172,7 +172,7 @@ function req(method, reqPath, body) {
     try { await tts.generateSoundEffect({ prompt: '' }); check('4a. empty sfx prompt rejected', false); }
     catch (e) { check('4a. empty sfx prompt → BAD_PROMPT', e.code === 'BAD_PROMPT'); }
 
-    try { await tts.generateSoundEffect({ prompt: 'x'.repeat(2001) }); check('4b. oversized sfx prompt rejected', false); }
+    try { await tts.generateSoundEffect({ prompt: 'x'.repeat(4101) }); check('4b. oversized sfx prompt rejected', false); }
     catch (e) { check('4b. oversized sfx prompt → BAD_PROMPT', e.code === 'BAD_PROMPT'); }
 
     try { await tts.generateSoundEffect({ prompt: 42 }); check('4c. non-string sfx prompt rejected', false); }

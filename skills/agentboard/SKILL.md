@@ -169,7 +169,7 @@ all at once.
 |---|---|---|---|---|
 | `generate_speech` | Narration, dialogue, voiceover | `audio:narration` | 1-5000 chars | $0.10 |
 | `generate_sound_effect` | One-shot SFX ("thunderclap", "metal door slam") | `audio:sfx` | 0.5-22 seconds | $0.05 |
-| `generate_music` | Score, ambient beds, musical cues | `audio:music` | 5-300 seconds | $0.20 |
+| `generate_music` | Score, ambient beds, musical cues | `audio:music` | 3-600 seconds | $0.20 |
 
 All three accept a `kind` override so you can route output to a
 different slot — for example `generate_sound_effect` with `kind:
@@ -185,11 +185,9 @@ Prompt tips:
   Pass `durationSeconds` if the default 5s isn't right.
 - **Music**: be descriptive about instruments, tempo, mood, and genre.
   "melancholic lo-fi piano with soft kick drum, 70 bpm" is much better
-  than "sad music". Pass `musicLengthMs` if the default 30s isn't right.
-
-`generate_music` requires beta access on the ElevenLabs plan. If your
-account doesn't have it, the call returns `PROVIDER_REJECTED` (HTTP
-422). Fall back to `upload_audio` with a pre-baked music file.
+  than "sad music". Pass `musicLengthMs` if the default 30s isn't right
+  (allowed 3000–600000). Pass `forceInstrumental: true` to guarantee
+  no vocals.
 
 Errors specific to audio generation:
 
@@ -198,7 +196,7 @@ Errors specific to audio generation:
 | `BAD_PROMPT` | 400 | Prompt empty / non-string / over 2000 chars |
 | `BAD_DURATION` | 400 | `durationSeconds` or `musicLengthMs` outside the allowed range |
 | `BAD_VOICE` | 400 | Speech only — `voice` is not a valid ElevenLabs voice id |
-| `PROVIDER_REJECTED` | 422 | Content moderation OR account lacks beta access for music |
+| `PROVIDER_REJECTED` | 422 | Content moderation rejection from ElevenLabs |
 
 ## Workflow: collaboratively edit an existing project
 

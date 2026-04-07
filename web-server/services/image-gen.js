@@ -165,8 +165,8 @@ const FAL_MODEL_PATHS = {
   'flux-kontext-multi': 'fal-ai/flux-pro/kontext/multi',
 
   // ── Flux 2 Pro (latest generation flagship) ──
-  // If fal.ai's path differs, update here — this is the one-line fix.
-  'flux-2-pro':      'fal-ai/flux-2/pro',
+  // Slug confirmed against fal.ai docs: fal-ai/flux-2-pro (no sub-path).
+  'flux-2-pro':      'fal-ai/flux-2-pro',
 
   // ── non-Flux alternatives ──
   'sdxl':            'fal-ai/fast-sdxl',
