@@ -15,7 +15,11 @@ const filesRouter = require('./routes/files');
 const exportRouter = require('./routes/export');
 const prefsRouter = require('./routes/prefs');
 const agentRouter = require('./routes/agent');
+const agentsRouter = require('./routes/agents');
 const appRouter = require('./routes/app');
+
+// Agent auth middleware — stamps req.agent on every request
+const { agentAuthMiddleware } = require('./middleware/agent-auth');
 
 const PORT = process.env.PORT || 3456;
 
@@ -43,6 +47,11 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 // Raw body parser for binary file writes
 app.use('/api/fs/write', express.raw({ type: '*/*', limit: '50mb' }));
 
+// Agent identity: stamp req.agent on every /api/* request.
+// In dev (AGENT_AUTH_ENABLED=0) anonymous access is attributed to the
+// built-in default user; in prod (=1), mutations require a bearer token.
+app.use('/api', agentAuthMiddleware);
+
 // ── Ensure data directories exist ──
 const DATA_DIR = path.join(__dirname, 'data');
 fs.ensureDirSync(path.join(DATA_DIR, 'projects'));
@@ -54,6 +63,7 @@ app.use('/api/projects', filesRouter);
 app.use('/api/projects', exportRouter);
 app.use('/api/prefs', prefsRouter);
 app.use('/api/agent', agentRouter);
+app.use('/api/agents', agentsRouter);
 app.use('/api/app', appRouter);
 
 // ── Health check ──
