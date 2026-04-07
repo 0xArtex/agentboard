@@ -158,6 +158,74 @@ each panel was generated with.
 `BAD_STYLE` (HTTP 400) means an unknown preset name. Call
 `list_image_styles` to see what's available.
 
+### How style presets actually reach the model
+
+When you pass `style: "storyboard-sketch"`, the server does three things
+before hitting fal.ai:
+
+1. **Composes the prompt** — prepends the preset's curated system prompt
+   to your user prompt. The model sees `"<style system prompt>\n\n<your
+   prompt>"`, not just your prompt alone. This is what locks the look.
+2. **Loads reference images from disk** as base64 data URIs. For
+   `storyboard-sketch` that's two PNGs from `web-server/assets/reference-
+   images/`.
+3. **Auto-routes to a kontext-capable model** (`flux-kontext-multi`)
+   and posts the references as `image_urls` in the request body. The
+   model uses them as visual exemplars.
+
+The response surfaces this in `providerMeta.style` and the asset's
+stored `meta.style`, so if you read the project back later you can tell
+which preset was used and how many references guided each panel.
+
+## Uploading pre-rendered art (drawing / images you already have)
+
+If you already have an image (you generated it elsewhere, the user
+attached one, you composited it yourself), upload it directly instead
+of regenerating. This is the AgentBoard "draw" path — despite the name,
+it's an image-bytes upload, not stroke commands. Stroke-command drawing
+is deferred to a future version.
+
+```
+upload_image({
+  projectId, boardUid,
+  layer: "fill",          // or "reference", "ink", "notes", "tone", "pencil"
+  imageBase64: "<base64>",
+  mime: "image/png"
+})
+```
+
+REST equivalent: `POST /api/agent/draw` (same body, returns same shape).
+
+When to use which:
+- **`generate_panel`** — you want fal.ai to make a new image from a prompt
+- **`upload_image`** — you already have the bytes (from an attachment,
+  another tool, an external generator, a previous run)
+
+The `layer` field determines compositing order on the board:
+`fill` (bottom) → `tone` → `pencil` → `ink` → `notes` (top), with
+`reference` as a separate slot for non-rendered visual references.
+For most cases, just upload to `fill` and ignore the rest.
+
+## Uploading pre-recorded audio
+
+Same idea but for sound. Use `upload_audio` when you already have
+narration/SFX/music bytes (recorded by a human, generated elsewhere,
+imported from a library) instead of calling the AI generators.
+
+```
+upload_audio({
+  projectId, boardUid,
+  kind: "narration",       // or "sfx" | "music" | "ambient" | "reference"
+  audioBase64: "<base64>",
+  mime: "audio/mpeg",      // or audio/wav, audio/ogg
+  duration: 4500           // optional, ms
+})
+```
+
+REST: `POST /api/agent/upload-audio`. One board can have multiple
+audio kinds simultaneously — narration + music + ambient is a common
+combo for a single panel.
+
 ## Audio: speech, sound effects, and music
 
 AgentBoard exposes three independent audio generation tools, each backed
@@ -247,8 +315,9 @@ All errors return structured JSON with a `code` field:
 | Code | HTTP | What it means | What to do |
 |---|---|---|---|
 | `BAD_REQUEST` | 400 | Missing/malformed field | Fix request shape |
-| `BAD_PROMPT` | 400 | Prompt empty / too short / too long (>2000 chars) | Reword |
+| `BAD_PROMPT` | 400 | Prompt outside length bounds. Image gen: 2-2000 chars. SFX/music: 1-4100 chars. Speech: 1-5000 chars. | Reword to fit |
 | `BAD_DURATION` | 400 | SFX/music duration outside allowed bounds | Pick a value within range |
+| `BAD_STYLE` | 400 | Unknown image style preset | Call list_image_styles |
 | `BAD_MODEL` | 400 | Unknown model name | Use a listed model |
 | `BAD_BASE64` | 400 | Image/audio base64 didn't decode | Re-encode |
 | `NO_BOARD` | 404 | boardUid doesn't exist | Verify via get_project |
@@ -368,11 +437,29 @@ capabilities are at `POST /api/agent/*` via direct HTTP — see the
 {
   "projectId": "...",
   "boardUid": "...",
-  "layer": "reference",
+  "layer": "fill",
   "imageBase64": "iVBORw0KGgoAAAANSUhEUgAA...",
   "mime": "image/png"
 }
 ```
+
+### upload_audio (when you already have audio bytes)
+```json
+{
+  "projectId": "...",
+  "boardUid": "...",
+  "kind": "music",
+  "audioBase64": "SUQzAwAAAAAA...",
+  "mime": "audio/mpeg",
+  "duration": 8200
+}
+```
+
+### list_image_styles
+```json
+{}
+```
+Returns `{ styles: [{ name, title, description, hasReferences, preferredModel }, ...] }`. Call before generate_panel if you're unsure which style to pick.
 
 ### set_metadata (batch update)
 ```json
@@ -398,9 +485,13 @@ Don't invoke for:
 - Simple image generation not tied to a narrative sequence (use the
   image provider directly if you have one)
 - Video editing (AgentBoard is storyboards, not finished video)
-- Generic TTS without a storyboard context
-- Drawing/painting from strokes (only image upload is supported; true
-  stroke-command drawing is deferred to a future version)
+- Generic TTS / music / SFX without a storyboard context — if you just
+  want a single audio clip with no board to attach it to, call the
+  audio provider directly
+- Stroke-command / brush-based drawing from a canvas — AgentBoard only
+  accepts pre-rendered image bytes via `upload_image`. True
+  programmatic stroke drawing is deferred to a future version
 
 Invoke when the user wants **an ordered sequence of visual panels**
-with text metadata and shareable output. That's the sweet spot.
+with text metadata, optional audio, and shareable output. That's the
+sweet spot.
