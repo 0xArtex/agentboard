@@ -89,6 +89,54 @@ function blankPng(width, height) {
 }
 
 /**
+ * Build an RGBA PNG filled with a single solid color. Used by the mock
+ * image-gen adapter to produce visibly-distinct placeholders. Same
+ * encoder as blankPng — we just set the pixel payload before deflating.
+ *
+ * @param {number} width
+ * @param {number} height
+ * @param {number} r  0-255
+ * @param {number} g  0-255
+ * @param {number} b  0-255
+ * @param {number} a  0-255 (default 255 opaque)
+ */
+function coloredPng(width, height, r, g, b, a = 255) {
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1) {
+    throw new Error(`coloredPng: invalid dimensions ${width}x${height}`);
+  }
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 6;
+  ihdr[10] = 0;
+  ihdr[11] = 0;
+  ihdr[12] = 0;
+
+  // Per-scanline: 1 filter byte + width*4 RGBA bytes.
+  const rowBytes = 1 + width * 4;
+  const raw = Buffer.alloc(rowBytes * height);
+  for (let y = 0; y < height; y++) {
+    const rowStart = y * rowBytes;
+    raw[rowStart] = 0; // filter byte (None)
+    for (let x = 0; x < width; x++) {
+      const px = rowStart + 1 + x * 4;
+      raw[px] = r & 0xff;
+      raw[px + 1] = g & 0xff;
+      raw[px + 2] = b & 0xff;
+      raw[px + 3] = a & 0xff;
+    }
+  }
+  const idat = zlib.deflateSync(raw);
+  return Buffer.concat([
+    PNG_SIGNATURE,
+    chunk('IHDR', ihdr),
+    chunk('IDAT', idat),
+    chunk('IEND', Buffer.alloc(0)),
+  ]);
+}
+
+/**
  * Pick reasonable pixel dimensions for a given aspect ratio. Storyboarder's
  * default project is 16:9, which we render at 1920×1080. For other ratios we
  * keep the height at 1080 and scale width to match (rounded to even pixels so
@@ -102,4 +150,4 @@ function dimensionsForAspect(aspectRatio) {
   return { width, height };
 }
 
-module.exports = { blankPng, dimensionsForAspect };
+module.exports = { blankPng, coloredPng, dimensionsForAspect };

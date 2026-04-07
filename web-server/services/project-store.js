@@ -111,12 +111,40 @@ const stmts = {
            audio       = COALESCE(?, audio),
            link        = COALESCE(?, link),
            meta        = COALESCE(?, meta),
-           last_edited = ?
+           last_edited = ?,
+           version     = version + 1
      WHERE uid = ?
+  `),
+  // Same as updateBoardFields but with an extra `version = ?` check for
+  // optimistic concurrency. Returns 0 rows-affected when the expected
+  // version doesn't match the current one, letting the caller decide
+  // whether to refetch + retry or surface a 409 to the user.
+  updateBoardFieldsVersioned: db.prepare(`
+    UPDATE boards
+       SET number      = COALESCE(?, number),
+           new_shot    = COALESCE(?, new_shot),
+           shot        = COALESCE(?, shot),
+           time_ms     = COALESCE(?, time_ms),
+           duration_ms = COALESCE(?, duration_ms),
+           dialogue    = COALESCE(?, dialogue),
+           action      = COALESCE(?, action),
+           notes       = COALESCE(?, notes),
+           audio       = COALESCE(?, audio),
+           link        = COALESCE(?, link),
+           meta        = COALESCE(?, meta),
+           last_edited = ?,
+           version     = version + 1
+     WHERE uid = ? AND version = ?
   `),
   setBoardNumber: db.prepare(`
     UPDATE boards SET number = ?, time_ms = ? WHERE uid = ?
   `),
+  // Asset writes + renumbers use this to bump last_edited WITHOUT bumping
+  // version — the point of version is optimistic concurrency for content
+  // (dialogue/action/notes), and we don't want a concurrent asset upload
+  // on the same board to invalidate another agent's in-flight metadata
+  // edit. Draws and metadata edits are independent domains.
+  touchBoardEdited: db.prepare('UPDATE boards SET last_edited = ? WHERE uid = ?'),
   deleteBoard: db.prepare('DELETE FROM boards WHERE uid = ?'),
 
   // board_assets
@@ -273,6 +301,9 @@ function rowToBoard(row) {
     action: row.action || '',
     notes: row.notes || '',
     layers,
+    // Monotonic integer bumped on every successful metadata update.
+    // Used by agents as the expectedVersion for optimistic concurrency.
+    version: row.version || 1,
   };
   if (audio) board.audio = audio;
   if (row.link) board.link = row.link;
@@ -452,10 +483,60 @@ async function addBoard(projectId, data = {}) {
   return rowToBoard(stmts.getBoard.get(uid));
 }
 
+/**
+ * Update board metadata. Every successful update bumps the board's
+ * `version` column so agents can use it for optimistic concurrency.
+ *
+ * options:
+ *   expectedVersion   when set, the UPDATE includes a `version = ?`
+ *                     guard. If the current version doesn't match,
+ *                     this throws VERSION_MISMATCH with a .code and
+ *                     .currentVersion set, and no changes are applied.
+ *                     Agents should refetch and retry.
+ */
 async function updateBoard(projectId, boardUid, updates = {}) {
   const board = stmts.getBoard.get(boardUid);
   if (!board || board.project_id !== projectId) return null;
 
+  const expectedVersion = updates.expectedVersion;
+  // Strip expectedVersion from the update payload before prep-statement
+  // binding — it's a control knob, not a column.
+  const expects = (expectedVersion != null && Number.isInteger(expectedVersion));
+
+  if (expects) {
+    const result = stmts.updateBoardFieldsVersioned.run(
+      updates.number ?? null,
+      updates.newShot != null ? (updates.newShot ? 1 : 0) : null,
+      updates.shot ?? null,
+      updates.time ?? null,
+      updates.duration ?? null,
+      updates.dialogue ?? null,
+      updates.action ?? null,
+      updates.notes ?? null,
+      updates.audio != null ? JSON.stringify(updates.audio) : null,
+      updates.link ?? null,
+      null, // meta
+      nowMs(),
+      boardUid,
+      expectedVersion
+    );
+    if (result.changes === 0) {
+      // Refetch current version to report it in the error
+      const current = stmts.getBoard.get(boardUid);
+      const err = new Error(
+        `Board ${boardUid} version mismatch (expected ${expectedVersion}, current ${current.version})`
+      );
+      err.code = 'VERSION_MISMATCH';
+      err.currentVersion = current.version;
+      err.expectedVersion = expectedVersion;
+      throw err;
+    }
+    // Touch the project updated_at
+    stmts.updateProjectFields.run(null, null, null, null, null, nowMs(), projectId);
+    return rowToBoard(stmts.getBoard.get(boardUid));
+  }
+
+  // Non-versioned path — kept for legacy clients that don't send expectedVersion
   stmts.updateBoardFields.run(
     updates.number ?? null,
     updates.newShot != null ? (updates.newShot ? 1 : 0) : null,
@@ -822,10 +903,10 @@ function storeLegacyAsset(projectId, filename, bytes) {
   const now = nowMs();
   stmts.upsertAsset.run(parsed.uid, parsed.kind, result.hash, null, now);
 
-  // Touch the board and project
-  stmts.updateBoardFields.run(
-    null, null, null, null, null, null, null, null, null, null, null, now, parsed.uid
-  );
+  // Touch the board's last_edited WITHOUT bumping version — asset writes
+  // are independent of metadata edits and shouldn't invalidate a
+  // concurrent agent's in-flight expectedVersion.
+  stmts.touchBoardEdited.run(now, parsed.uid);
   stmts.updateProjectFields.run(null, null, null, null, null, now, projectId);
 
   return { hash: result.hash, kind: parsed.kind, boardUid: parsed.uid };
@@ -861,9 +942,8 @@ function storeBoardAsset(projectId, boardUid, kind, bytes, mime, meta = null) {
   const now = nowMs();
   const metaJson = meta && typeof meta === 'object' ? JSON.stringify(meta) : null;
   stmts.upsertAsset.run(boardUid, kind, result.hash, metaJson, now);
-  stmts.updateBoardFields.run(
-    null, null, null, null, null, null, null, null, null, null, null, now, boardUid
-  );
+  // Touch last_edited without bumping version (see storeLegacyAsset).
+  stmts.touchBoardEdited.run(now, boardUid);
   stmts.updateProjectFields.run(null, null, null, null, null, now, projectId);
 
   return {

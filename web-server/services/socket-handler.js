@@ -1,12 +1,49 @@
 // WebSocket handler — replaces Electron's ipcRenderer/ipcMain
 // Broadcasts real-time events to all connected clients
 // Also handles Electron IPC channels that the electron-shim maps to socket.io
+//
+// Project rooms:
+//   Agents and the legacy web client can subscribe to specific projects so
+//   mutation broadcasts (board:update, asset:update, etc) only reach
+//   interested parties. Clients join via:
+//
+//     socket.emit('project:subscribe', { projectId: '<uuid>' })
+//
+//   Server response:
+//     'project:subscribed'   on success
+//     'project:unsubscribed' on leave
+//
+//   The global `broadcast()` helper still exists for legacy single-broadcast
+//   channels. New code should prefer `broadcastToProject(projectId, event,
+//   data)` which limits fanout to the relevant room.
 
 const LANGUAGE = 'en';
+
+function projectRoom(projectId) {
+  return `project:${projectId}`;
+}
 
 function setupSocketHandler(io) {
   io.on('connection', (socket) => {
     console.log(`[ws] Client connected: ${socket.id}`);
+
+    // ── Project room subscribe / unsubscribe ──
+    socket.on('project:subscribe', (data = {}) => {
+      const projectId = data.projectId;
+      if (!projectId || typeof projectId !== 'string') {
+        socket.emit('project:subscribe:error', { code: 'BAD_REQUEST', message: 'projectId required' });
+        return;
+      }
+      socket.join(projectRoom(projectId));
+      socket.emit('project:subscribed', { projectId });
+    });
+
+    socket.on('project:unsubscribe', (data = {}) => {
+      const projectId = data.projectId;
+      if (!projectId || typeof projectId !== 'string') return;
+      socket.leave(projectRoom(projectId));
+      socket.emit('project:unsubscribed', { projectId });
+    });
 
     // ── Board events ──
     socket.on('board:update', (data) => {
@@ -111,9 +148,19 @@ function setupSocketHandler(io) {
   });
 
   return {
-    // Emit to ALL clients (used by REST API handlers)
+    // Emit to ALL clients (legacy catch-all for events that don't have
+    // a specific project scope, like project:create).
     broadcast(event, data) {
       io.emit(event, data);
+    },
+    // Emit only to sockets that have explicitly joined the project room.
+    // Preferred path for mutation events on a specific project.
+    broadcastToProject(projectId, event, data) {
+      if (!projectId) {
+        io.emit(event, data);
+        return;
+      }
+      io.to(projectRoom(projectId)).emit(event, data);
     },
   };
 }

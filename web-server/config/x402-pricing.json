@@ -1,0 +1,14 @@
+{
+  "generate-image": {
+    "priceAtomic": "250000",
+    "description": "AI image generation (fal.ai)"
+  },
+  "generate-speech": {
+    "priceAtomic": "100000",
+    "description": "AI text-to-speech (ElevenLabs)"
+  },
+  "export-pdf": {
+    "priceAtomic": "0",
+    "description": "Storyboard PDF export"
+  }
+}

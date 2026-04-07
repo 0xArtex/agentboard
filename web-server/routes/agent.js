@@ -27,8 +27,25 @@ const router = express.Router();
 const store = require('../services/project-store');
 const agents = require('../services/agents');
 const shareTokens = require('../services/share-tokens');
+const imageGen = require('../services/image-gen');
+const tts = require('../services/tts');
+const pricing = require('../services/pricing');
+const x402Gate = require('../middleware/x402-gate');
+const { frequencyLimiter, dailySpendLimiter } = require('../middleware/rate-limit');
 const { asyncHandler } = require('../middleware/error-handler');
 const { requireAgent } = require('../middleware/agent-auth');
+
+// Each gated capability resolves its price through services/pricing.js,
+// which consults the env vars, then config/x402-pricing.json, then
+// hardcoded defaults in that order. This lets us change prices without
+// redeploying by editing the config file.
+function priceFor(capability) {
+  const p = pricing.getPrice(capability);
+  if (!p) {
+    throw new Error(`priceFor: no pricing entry for '${capability}'`);
+  }
+  return p;
+}
 
 // ── helpers ────────────────────────────────────────────────────────────
 
@@ -57,9 +74,18 @@ function decodeBase64(input, fieldName) {
 
 function broadcast(req, event, payload) {
   const handler = req.app.locals.socketHandler;
-  if (handler && typeof handler.broadcast === 'function') {
-    try { handler.broadcast(event, payload); } catch (e) { /* socket errors are non-fatal */ }
-  }
+  if (!handler) return;
+  try {
+    // Prefer project-scoped broadcasts when we know the projectId, so
+    // subscribers to OTHER projects don't get spammed with irrelevant
+    // events. Falls back to the global broadcast for events like
+    // project:create where the new project id isn't in an existing room.
+    if (payload && payload.projectId && typeof handler.broadcastToProject === 'function') {
+      handler.broadcastToProject(payload.projectId, event, payload);
+    } else if (typeof handler.broadcast === 'function') {
+      handler.broadcast(event, payload);
+    }
+  } catch (e) { /* socket errors are non-fatal */ }
 }
 
 function publicShareUrl(req, projectId) {
@@ -280,14 +306,16 @@ router.post('/add-scene', requireProjectAccess('write'), asyncHandler(async (req
 }));
 
 // PUT /api/agent/board/:uid
-// Body: partial board update. projectId is derived from the board.
-// This one doesn't use requireProjectAccess because the project id comes
-// from the board, not the URL — we do the permission check inline.
+// Body: partial board update. projectId is derived from the body.
+//
+// Optimistic concurrency: include `expectedVersion: <int>` in the body to
+// assert the board hasn't been modified since you read it. If the board's
+// current version differs, the server returns 409 with the current state
+// so the caller can merge + retry. Omitting expectedVersion means
+// last-write-wins.
 router.put('/board/:uid', asyncHandler(async (req, res) => {
   const uid = req.params.uid;
   const body = req.body || {};
-  // Look up the board so we know which project to permission-check
-  const existing = await store.getProject(body.projectId || '');
   const projectId = body.projectId;
   if (!projectId) {
     return res.status(400).json({ error: { code: 'BAD_REQUEST', message: 'projectId required in body' } });
@@ -295,28 +323,83 @@ router.put('/board/:uid', asyncHandler(async (req, res) => {
   if (!agents.canWrite(projectId, req.agent.userId)) {
     return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'read-write access required' } });
   }
-  const board = await store.updateBoard(projectId, uid, body);
-  if (!board) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Board not found in project' } });
-  broadcast(req, 'board:update', { projectId, board });
-  res.json({ board });
+  try {
+    const board = await store.updateBoard(projectId, uid, body);
+    if (!board) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Board not found in project' } });
+    broadcast(req, 'board:update', { projectId, board });
+    res.json({ board });
+  } catch (err) {
+    if (err.code === 'VERSION_MISMATCH') {
+      // Fetch the current board so the caller can merge + retry without
+      // a separate round-trip
+      const current = await store.getProject(projectId);
+      const currentBoard = current && current.project.boards.find(b => b.uid === uid);
+      return res.status(409).json({
+        error: {
+          code: 'VERSION_MISMATCH',
+          message: err.message,
+          expectedVersion: err.expectedVersion,
+          currentVersion: err.currentVersion,
+        },
+        board: currentBoard || null,
+      });
+    }
+    throw err;
+  }
 }));
 
 // POST /api/agent/set-metadata
-// Body: { projectId, updates: [{ boardUid, dialogue?, action?, notes?, duration?, newShot?, shot? }, ...] }
-// Batch metadata update — useful for agents editing a whole scene at once.
+// Body: {
+//   projectId,
+//   updates: [{
+//     boardUid,
+//     expectedVersion?,     // optional per-entry optimistic concurrency
+//     dialogue?, action?, notes?, duration?, newShot?, shot?
+//   }, ...]
+// }
+// Batch metadata update. Each entry is applied independently — if one
+// fails with a version mismatch, the others still run, and the response
+// surfaces per-board status so the caller can retry just the stale ones.
 router.post('/set-metadata', requireProjectAccess('write'), asyncHandler(async (req, res) => {
   const body = req.body || {};
   if (!Array.isArray(body.updates) || body.updates.length === 0) {
     return res.status(400).json({ error: { code: 'BAD_REQUEST', message: 'updates[] required' } });
   }
   const results = [];
+  const conflicts = [];
+  let anyConflict = false;
   for (const u of body.updates) {
     if (!u.boardUid) continue;
-    const board = await store.updateBoard(req.projectId, u.boardUid, u);
-    if (board) results.push(board);
+    try {
+      const board = await store.updateBoard(req.projectId, u.boardUid, u);
+      if (board) results.push(board);
+      else conflicts.push({ boardUid: u.boardUid, code: 'NOT_FOUND' });
+    } catch (err) {
+      if (err.code === 'VERSION_MISMATCH') {
+        anyConflict = true;
+        const current = (await store.getProject(req.projectId)).project.boards.find(b => b.uid === u.boardUid);
+        conflicts.push({
+          boardUid: u.boardUid,
+          code: 'VERSION_MISMATCH',
+          expectedVersion: err.expectedVersion,
+          currentVersion: err.currentVersion,
+          currentBoard: current || null,
+        });
+      } else {
+        throw err;
+      }
+    }
   }
-  broadcast(req, 'board:metadata', { projectId: req.projectId, boards: results });
-  res.json({ boards: results });
+  if (results.length > 0) {
+    broadcast(req, 'board:metadata', { projectId: req.projectId, boards: results });
+  }
+  // 207 Multi-Status when we have a mix of success + conflict, so clients
+  // can tell the difference cheaply. All-success → 200. All-conflict → 409.
+  let status = 200;
+  if (anyConflict) {
+    status = results.length === 0 ? 409 : 207;
+  }
+  res.status(status).json({ boards: results, conflicts });
 }));
 
 // DELETE /api/agent/board/:uid
@@ -415,29 +498,238 @@ router.post('/upload-audio', requireProjectAccess('write'), asyncHandler(async (
   }
 }));
 
-// ── stubs that future tasks will implement ─────────────────────────────
-// These return 501 so the API surface is discoverable but the unfinished
-// bits are clearly marked. Each references the task that implements it.
+// ── AI image generation ────────────────────────────────────────────────
+//
+// POST /api/agent/generate-image
+// Body: {
+//   projectId:     string   (required, must be read-write)
+//   boardUid:      string   (required)
+//   layer:         string   (optional, default 'fill')
+//   prompt:        string   (required, 2-2000 chars)
+//   model?:        string   (default 'flux-schnell'; provider-specific)
+//   aspectRatio?:  number   (default: the project's aspectRatio)
+//   seed?:         number
+//   negativePrompt?: string
+//   steps?:        number
+// }
+//
+// Gated by x402 in prod (0.25 USDC default). Generated image is stored as
+// a layer asset on the target board with provider metadata (prompt, seed,
+// model) tucked into the board_assets meta JSON for future reference.
+//
+// Response 201: { hash, size, kind, boardUid, provider, model, prompt, imageUrl }
+router.post('/generate-image',
+  frequencyLimiter({ windowMs: 60_000, max: 20 }),
+  x402Gate({
+    priceAtomic: () => priceFor('generate-image').priceAtomic,
+    description: () => priceFor('generate-image').description,
+  }),
+  dailySpendLimiter(),
+  requireProjectAccess('write'),
+  asyncHandler(async (req, res) => {
+    const body = req.body || {};
+    const { boardUid, prompt } = body;
+    const layer = body.layer || 'fill';
 
-// Task #36 — AI image generation
-router.post('/generate-image', asyncHandler(async (req, res) => {
-  res.status(501).json({
-    error: {
-      code: 'NOT_IMPLEMENTED',
-      message: 'Image generation lands with task #36 (fal.ai adapter + x402)',
-    },
-  });
-}));
+    if (!boardUid) {
+      if (req.x402Payment) req.x402Payment.markFailed(new Error('missing boardUid'));
+      return res.status(400).json({ error: { code: 'BAD_REQUEST', message: 'boardUid required' } });
+    }
 
-// Task #37 — ElevenLabs TTS
-router.post('/generate-speech', asyncHandler(async (req, res) => {
-  res.status(501).json({
-    error: {
-      code: 'NOT_IMPLEMENTED',
-      message: 'Text-to-speech lands with task #37 (ElevenLabs adapter + x402)',
-    },
-  });
-}));
+    // Load project to pick up aspectRatio default
+    const projectResult = await store.getProject(req.projectId);
+    if (!projectResult) {
+      if (req.x402Payment) req.x402Payment.markFailed(new Error('project not found'));
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Project not found' } });
+    }
+    const aspectRatio = body.aspectRatio || projectResult.project.aspectRatio;
+
+    // Generate
+    let result;
+    try {
+      result = await imageGen.generateImage({
+        prompt,
+        aspectRatio,
+        model: body.model,
+        seed: body.seed,
+        negativePrompt: body.negativePrompt,
+        steps: body.steps,
+      });
+    } catch (err) {
+      if (req.x402Payment) req.x402Payment.markFailed(err);
+      if (err instanceof imageGen.ImageGenError) {
+        const statusByCode = {
+          BAD_PROMPT: 400,
+          BAD_MODEL: 400,
+          PROVIDER_REJECTED: 422,       // content moderation / bad input
+          PROVIDER_MALFORMED: 502,      // upstream spoke garbage
+          PROVIDER_UNAVAILABLE: 503,    // transient
+          NOT_IMPLEMENTED: 501,
+        };
+        const status = statusByCode[err.code] || 500;
+        return res.status(status).json({
+          error: { code: err.code, message: err.message },
+        });
+      }
+      throw err;
+    }
+
+    // Store the generated bytes as a layer asset on the target board
+    let stored;
+    try {
+      stored = store.storeBoardAsset(
+        req.projectId,
+        boardUid,
+        'layer:' + layer,
+        result.bytes,
+        result.mime,
+        {
+          prompt: result.providerMeta.prompt,
+          provider: result.providerMeta.provider,
+          model: result.providerMeta.model,
+          seed: result.providerMeta.seed,
+          generatedAt: Date.now(),
+        }
+      );
+    } catch (err) {
+      if (req.x402Payment) req.x402Payment.markFailed(err);
+      const status = err.code === 'NO_BOARD' ? 404 : (err.code === 'WRONG_PROJECT' ? 403 : 400);
+      return res.status(status).json({ error: { code: err.code, message: err.message } });
+    }
+
+    if (req.x402Payment) req.x402Payment.markServed();
+
+    broadcast(req, 'asset:update', {
+      projectId: req.projectId, boardUid, kind: stored.kind, hash: stored.hash,
+    });
+
+    const urls = publicShareUrl(req, req.projectId);
+    res.status(201).json({
+      hash: stored.hash,
+      size: stored.size,
+      kind: stored.kind,
+      boardUid,
+      provider: result.providerMeta.provider,
+      model: result.providerMeta.model,
+      prompt: result.providerMeta.prompt,
+      imageUrl: `${urls.apiUrl.replace('/api/projects/', '/web/projects/')}/images/board-${
+        projectResult.project.boards.find(b => b.uid === boardUid).number
+      }-${boardUid}-${layer}.png`,
+    });
+  })
+);
+
+// ── AI text-to-speech ──────────────────────────────────────────────────
+//
+// POST /api/agent/generate-speech
+// Body: {
+//   projectId:        string   (required, must be read-write)
+//   boardUid:         string   (required)
+//   kind?:            'narration' | 'sfx' | 'music' | 'ambient' | 'reference' (default narration)
+//   text:             string   (required, 1-5000 chars)
+//   voice?:           string   (provider-specific voice id)
+//   model?:           string   (provider-specific model id)
+//   stability?:       number   (ElevenLabs: 0-1)
+//   similarityBoost?: number   (ElevenLabs: 0-1)
+//   style?:           number   (ElevenLabs: 0-1)
+//   speakerBoost?:    boolean  (ElevenLabs)
+// }
+//
+// Gated by x402 in prod (0.10 USDC default). Generated audio stored as an
+// audio:<kind> asset on the board with provider metadata including the
+// source text, voice, model, and duration.
+//
+// Response 201: { hash, size, kind, boardUid, provider, model, voice, durationMs }
+router.post('/generate-speech',
+  frequencyLimiter({ windowMs: 60_000, max: 30 }),
+  x402Gate({
+    priceAtomic: () => priceFor('generate-speech').priceAtomic,
+    description: () => priceFor('generate-speech').description,
+  }),
+  dailySpendLimiter(),
+  requireProjectAccess('write'),
+  asyncHandler(async (req, res) => {
+    const body = req.body || {};
+    const { boardUid, text } = body;
+    const subkind = (body.kind || 'narration').replace(/[^a-z]/g, '');
+
+    if (!boardUid) {
+      if (req.x402Payment) req.x402Payment.markFailed(new Error('missing boardUid'));
+      return res.status(400).json({ error: { code: 'BAD_REQUEST', message: 'boardUid required' } });
+    }
+
+    let result;
+    try {
+      result = await tts.generateSpeech({
+        text,
+        voice: body.voice,
+        model: body.model,
+        stability: body.stability,
+        similarityBoost: body.similarityBoost,
+        style: body.style,
+        speakerBoost: body.speakerBoost,
+      });
+    } catch (err) {
+      if (req.x402Payment) req.x402Payment.markFailed(err);
+      if (err instanceof tts.TtsError) {
+        const statusByCode = {
+          BAD_TEXT: 400,
+          BAD_VOICE: 400,
+          BAD_MODEL: 400,
+          PROVIDER_REJECTED: 422,
+          PROVIDER_MALFORMED: 502,
+          PROVIDER_UNAVAILABLE: 503,
+          NOT_IMPLEMENTED: 501,
+        };
+        const status = statusByCode[err.code] || 500;
+        return res.status(status).json({
+          error: { code: err.code, message: err.message },
+        });
+      }
+      throw err;
+    }
+
+    let stored;
+    try {
+      stored = store.storeBoardAsset(
+        req.projectId,
+        boardUid,
+        'audio:' + subkind,
+        result.bytes,
+        result.mime,
+        {
+          text: result.providerMeta.text,
+          provider: result.providerMeta.provider,
+          model: result.providerMeta.model,
+          voice: result.providerMeta.voice,
+          durationMs: result.durationMs,
+          generatedAt: Date.now(),
+        }
+      );
+    } catch (err) {
+      if (req.x402Payment) req.x402Payment.markFailed(err);
+      const status = err.code === 'NO_BOARD' ? 404 : (err.code === 'WRONG_PROJECT' ? 403 : 400);
+      return res.status(status).json({ error: { code: err.code, message: err.message } });
+    }
+
+    if (req.x402Payment) req.x402Payment.markServed();
+
+    broadcast(req, 'asset:update', {
+      projectId: req.projectId, boardUid, kind: stored.kind, hash: stored.hash,
+    });
+
+    res.status(201).json({
+      hash: stored.hash,
+      size: stored.size,
+      kind: stored.kind,
+      boardUid,
+      provider: result.providerMeta.provider,
+      model: result.providerMeta.model,
+      voice: result.providerMeta.voice,
+      durationMs: result.durationMs,
+    });
+  })
+);
 
 // POST /api/agent/export/pdf
 // Body: { projectId }
