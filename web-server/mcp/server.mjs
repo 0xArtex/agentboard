@@ -37,7 +37,10 @@
  *   - upload_image            upload a base64 PNG to a layer
  *   - upload_audio            upload base64 audio with kind (narration/sfx/...)
  *   - generate_panel          AI image generation (fal.ai, x402-gated)
+ *   - list_image_styles       list available named visual style presets
  *   - generate_speech         AI text-to-speech (ElevenLabs, x402-gated)
+ *   - generate_sound_effect   AI sound effect generation (ElevenLabs, x402-gated)
+ *   - generate_music          AI music composition (ElevenLabs, x402-gated)
  *   - export_pdf              download the project as a PDF buffer
  *   - get_board_url           generate a shareable view URL
  *   - mint_share_token        create a time-limited share token
@@ -407,7 +410,9 @@ server.registerTool(
     description:
       'Generate text-to-speech audio for a board using ElevenLabs. The server calls ' +
       'the TTS provider, downloads the audio, and stores it as an audio:<kind> asset on ' +
-      'the target board. x402-gated in production.',
+      'the target board. Use this for narration and dialogue. For non-speech audio ' +
+      'use generate_sound_effect (one-shot SFX) or generate_music (musical pieces). ' +
+      'x402-gated in production.',
     inputSchema: {
       projectId: z.string(),
       boardUid: z.string(),
@@ -421,6 +426,60 @@ server.registerTool(
   },
   handle(async (args) => {
     const result = await apiRequest('POST', '/api/agent/generate-speech', args);
+    return okText(result);
+  })
+);
+
+// ── tool: generate_sound_effect ────────────────────────────────────────
+server.registerTool(
+  'generate_sound_effect',
+  {
+    title: 'Generate a sound effect with AI',
+    description:
+      'Generate a one-shot sound effect for a board using ElevenLabs sound generation. ' +
+      'Best for short prompts describing a discrete sound: "thunderclap", "footsteps on ' +
+      'gravel", "metal door slam", "car engine starting". Stored as audio:sfx by default ' +
+      '(or audio:ambient if kind=ambient). Duration is bounded 0.5-22 seconds. x402-gated ' +
+      'in production. For dialogue/narration use generate_speech, for musical pieces use ' +
+      'generate_music.',
+    inputSchema: {
+      projectId: z.string(),
+      boardUid: z.string(),
+      prompt: z.string().describe('Short description of the sound, e.g. "distant thunder rumbling"'),
+      durationSeconds: z.number().optional().describe('Length in seconds (0.5-22, default 5)'),
+      promptInfluence: z.number().optional().describe('How strictly to follow the prompt (0-1, default provider choice)'),
+      kind: z.string().optional().describe('sfx (default) | ambient'),
+    },
+  },
+  handle(async (args) => {
+    const result = await apiRequest('POST', '/api/agent/generate-sfx', args);
+    return okText(result);
+  })
+);
+
+// ── tool: generate_music ───────────────────────────────────────────────
+server.registerTool(
+  'generate_music',
+  {
+    title: 'Generate music with AI',
+    description:
+      'Compose a piece of music for a board using ElevenLabs music compose. Best for ' +
+      'descriptive prompts like "melancholic lo-fi piano with soft kick drum, 70 bpm" ' +
+      'or "epic orchestral cue, building tension, strings and timpani". Stored as ' +
+      'audio:music by default (or audio:ambient if kind=ambient). Length is bounded ' +
+      '5-300 seconds. x402-gated in production. NOTE: requires beta access on ElevenLabs ' +
+      'plan — if your account does not have it, the call returns PROVIDER_REJECTED and ' +
+      'you should fall back to upload_audio with a pre-baked track.',
+    inputSchema: {
+      projectId: z.string(),
+      boardUid: z.string(),
+      prompt: z.string().describe('Description of the desired music — instruments, mood, tempo, genre'),
+      musicLengthMs: z.number().optional().describe('Length in milliseconds (5000-300000, default 30000)'),
+      kind: z.string().optional().describe('music (default) | ambient'),
+    },
+  },
+  handle(async (args) => {
+    const result = await apiRequest('POST', '/api/agent/generate-music', args);
     return okText(result);
   })
 );

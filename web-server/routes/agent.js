@@ -751,6 +751,212 @@ router.post('/generate-speech',
   })
 );
 
+// ── AI sound effects ───────────────────────────────────────────────────
+//
+// POST /api/agent/generate-sfx
+// Body: {
+//   projectId:        string   (required, must be read-write)
+//   boardUid:         string   (required)
+//   prompt:           string   (required, 1-2000 chars — describes the sound)
+//   durationSeconds?: number   (0.5-22, default 5)
+//   promptInfluence?: number   (0-1, ElevenLabs only — higher = stricter prompt adherence)
+//   kind?:            'sfx' | 'ambient' (default sfx)
+// }
+//
+// Gated by x402 in prod (0.05 USDC default). Generated audio stored as an
+// audio:<kind> asset on the board with prompt + duration metadata.
+//
+// Response 201: { hash, size, kind, boardUid, provider, prompt, durationMs }
+router.post('/generate-sfx',
+  frequencyLimiter({ windowMs: 60_000, max: 30 }),
+  x402Gate({
+    priceAtomic: () => priceFor('generate-sfx').priceAtomic,
+    description: () => priceFor('generate-sfx').description,
+  }),
+  dailySpendLimiter(),
+  requireProjectAccess('write'),
+  asyncHandler(async (req, res) => {
+    const body = req.body || {};
+    const { boardUid, prompt } = body;
+    const subkind = (body.kind || 'sfx').replace(/[^a-z]/g, '') || 'sfx';
+
+    if (!boardUid) {
+      if (req.x402Payment) req.x402Payment.markFailed(new Error('missing boardUid'));
+      return res.status(400).json({ error: { code: 'BAD_REQUEST', message: 'boardUid required' } });
+    }
+
+    let result;
+    try {
+      result = await tts.generateSoundEffect({
+        prompt,
+        durationSeconds: body.durationSeconds,
+        promptInfluence: body.promptInfluence,
+      });
+    } catch (err) {
+      if (req.x402Payment) req.x402Payment.markFailed(err);
+      if (err instanceof tts.TtsError) {
+        const statusByCode = {
+          BAD_PROMPT: 400,
+          BAD_DURATION: 400,
+          PROVIDER_REJECTED: 422,
+          PROVIDER_MALFORMED: 502,
+          PROVIDER_UNAVAILABLE: 503,
+          NOT_IMPLEMENTED: 501,
+        };
+        const status = statusByCode[err.code] || 500;
+        return res.status(status).json({
+          error: { code: err.code, message: err.message },
+        });
+      }
+      throw err;
+    }
+
+    let stored;
+    try {
+      stored = await store.storeBoardAsset(
+        req.projectId,
+        boardUid,
+        'audio:' + subkind,
+        result.bytes,
+        result.mime,
+        {
+          prompt: result.providerMeta.prompt,
+          provider: result.providerMeta.provider,
+          kind: 'sfx',
+          durationSeconds: result.providerMeta.durationSeconds,
+          promptInfluence: result.providerMeta.promptInfluence,
+          durationMs: result.durationMs,
+          generatedAt: Date.now(),
+        }
+      );
+    } catch (err) {
+      if (req.x402Payment) req.x402Payment.markFailed(err);
+      const status = err.code === 'NO_BOARD' ? 404 : (err.code === 'WRONG_PROJECT' ? 403 : 400);
+      return res.status(status).json({ error: { code: err.code, message: err.message } });
+    }
+
+    if (req.x402Payment) req.x402Payment.markServed();
+
+    broadcast(req, 'asset:update', {
+      projectId: req.projectId, boardUid, kind: stored.kind, hash: stored.hash,
+    });
+
+    res.status(201).json({
+      hash: stored.hash,
+      size: stored.size,
+      kind: stored.kind,
+      boardUid,
+      provider: result.providerMeta.provider,
+      prompt: result.providerMeta.prompt,
+      durationSeconds: result.providerMeta.durationSeconds,
+      durationMs: result.durationMs,
+    });
+  })
+);
+
+// ── AI music composition ───────────────────────────────────────────────
+//
+// POST /api/agent/generate-music
+// Body: {
+//   projectId:     string   (required, must be read-write)
+//   boardUid:      string   (required)
+//   prompt:        string   (required, 1-2000 chars — describes the music)
+//   musicLengthMs? number   (5000-300000, default 30000)
+//   kind?:         'music' | 'ambient' (default music)
+// }
+//
+// Gated by x402 in prod (0.20 USDC default — music is heavier than SFX).
+// Generated audio stored as an audio:<kind> asset.
+//
+// NOTE: ElevenLabs music compose may require beta access. If your account
+// doesn't have it, the route returns 422 PROVIDER_REJECTED. Agents can
+// fall back to /api/agent/upload-audio with pre-baked music.
+//
+// Response 201: { hash, size, kind, boardUid, provider, prompt, durationMs }
+router.post('/generate-music',
+  frequencyLimiter({ windowMs: 60_000, max: 15 }),
+  x402Gate({
+    priceAtomic: () => priceFor('generate-music').priceAtomic,
+    description: () => priceFor('generate-music').description,
+  }),
+  dailySpendLimiter(),
+  requireProjectAccess('write'),
+  asyncHandler(async (req, res) => {
+    const body = req.body || {};
+    const { boardUid, prompt } = body;
+    const subkind = (body.kind || 'music').replace(/[^a-z]/g, '') || 'music';
+
+    if (!boardUid) {
+      if (req.x402Payment) req.x402Payment.markFailed(new Error('missing boardUid'));
+      return res.status(400).json({ error: { code: 'BAD_REQUEST', message: 'boardUid required' } });
+    }
+
+    let result;
+    try {
+      result = await tts.generateMusic({
+        prompt,
+        musicLengthMs: body.musicLengthMs,
+      });
+    } catch (err) {
+      if (req.x402Payment) req.x402Payment.markFailed(err);
+      if (err instanceof tts.TtsError) {
+        const statusByCode = {
+          BAD_PROMPT: 400,
+          BAD_DURATION: 400,
+          PROVIDER_REJECTED: 422,
+          PROVIDER_MALFORMED: 502,
+          PROVIDER_UNAVAILABLE: 503,
+          NOT_IMPLEMENTED: 501,
+        };
+        const status = statusByCode[err.code] || 500;
+        return res.status(status).json({
+          error: { code: err.code, message: err.message },
+        });
+      }
+      throw err;
+    }
+
+    let stored;
+    try {
+      stored = await store.storeBoardAsset(
+        req.projectId,
+        boardUid,
+        'audio:' + subkind,
+        result.bytes,
+        result.mime,
+        {
+          prompt: result.providerMeta.prompt,
+          provider: result.providerMeta.provider,
+          kind: 'music',
+          musicLengthMs: result.providerMeta.musicLengthMs,
+          durationMs: result.durationMs,
+          generatedAt: Date.now(),
+        }
+      );
+    } catch (err) {
+      if (req.x402Payment) req.x402Payment.markFailed(err);
+      const status = err.code === 'NO_BOARD' ? 404 : (err.code === 'WRONG_PROJECT' ? 403 : 400);
+      return res.status(status).json({ error: { code: err.code, message: err.message } });
+    }
+
+    if (req.x402Payment) req.x402Payment.markServed();
+
+    broadcast(req, 'asset:update', {
+      projectId: req.projectId, boardUid, kind: stored.kind, hash: stored.hash,
+    });
+
+    res.status(201).json({
+      hash: stored.hash,
+      size: stored.size,
+      kind: stored.kind,
+      boardUid,
+      provider: result.providerMeta.provider,
+      prompt: result.providerMeta.prompt,
+      durationMs: result.durationMs,
+    });
+  })
+);
+
 // POST /api/agent/export/pdf
 // Body: { projectId }
 // Returns the PDF bytes directly (application/pdf). Caller gets a

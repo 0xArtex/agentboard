@@ -7,6 +7,14 @@
     "priceAtomic": "100000",
     "description": "AI text-to-speech (ElevenLabs)"
   },
+  "generate-sfx": {
+    "priceAtomic": "50000",
+    "description": "AI sound effect generation (ElevenLabs)"
+  },
+  "generate-music": {
+    "priceAtomic": "200000",
+    "description": "AI music composition (ElevenLabs)"
+  },
   "export-pdf": {
     "priceAtomic": "0",
     "description": "Storyboard PDF export"

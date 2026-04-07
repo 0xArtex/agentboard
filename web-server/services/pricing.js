@@ -34,6 +34,8 @@ const CONFIG_PATH = path.join(__dirname, '..', 'config', 'x402-pricing.json');
 const DEFAULT_PRICES = {
   'generate-image':  { priceAtomic: '250000', description: 'AI image generation' },
   'generate-speech': { priceAtomic: '100000', description: 'AI text-to-speech' },
+  'generate-sfx':    { priceAtomic: '50000',  description: 'AI sound effect generation' },
+  'generate-music':  { priceAtomic: '200000', description: 'AI music composition' },
   'export-pdf':      { priceAtomic: '0',      description: 'Storyboard PDF export' },
 };
 

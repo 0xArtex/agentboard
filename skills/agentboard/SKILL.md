@@ -23,7 +23,9 @@ can invoke them directly:
 - `upload_image`, `upload_audio`
 - `generate_panel` (AI image gen, supports style presets)
 - `list_image_styles` (browse available style presets)
-- `generate_speech` (AI TTS)
+- `generate_speech` (AI TTS — narration / dialogue)
+- `generate_sound_effect` (AI one-shot SFX)
+- `generate_music` (AI music composition)
 - `export_pdf`
 - `get_board_url`, `mint_share_token`
 
@@ -32,6 +34,7 @@ directly at `AGENTBOARD_URL` (default `http://localhost:3456`):
 
 - `POST /api/agent/create-project` — same shape as `create_storyboard`
 - `POST /api/agent/generate-image`, `/generate-speech`
+- `POST /api/agent/generate-sfx`, `/generate-music`
 - `POST /api/agent/draw`, `/upload-audio`
 - `POST /api/agent/export/pdf`
 - `GET /api/agent/project/:id`, `/projects`, `/share/:id`
@@ -155,6 +158,48 @@ each panel was generated with.
 `BAD_STYLE` (HTTP 400) means an unknown preset name. Call
 `list_image_styles` to see what's available.
 
+## Audio: speech, sound effects, and music
+
+AgentBoard exposes three independent audio generation tools, each backed
+by ElevenLabs. They write to different `audio:<kind>` slots on the same
+board so a single panel can have narration, ambient SFX, and a music bed
+all at once.
+
+| Tool | Best for | Default slot | Bounds | Default price |
+|---|---|---|---|---|
+| `generate_speech` | Narration, dialogue, voiceover | `audio:narration` | 1-5000 chars | $0.10 |
+| `generate_sound_effect` | One-shot SFX ("thunderclap", "metal door slam") | `audio:sfx` | 0.5-22 seconds | $0.05 |
+| `generate_music` | Score, ambient beds, musical cues | `audio:music` | 5-300 seconds | $0.20 |
+
+All three accept a `kind` override so you can route output to a
+different slot — for example `generate_sound_effect` with `kind:
+"ambient"` writes to `audio:ambient` (useful when you want both a
+hard-cut SFX and a continuous bed on the same board).
+
+Prompt tips:
+
+- **Speech**: write the text exactly as it should be spoken. Include
+  punctuation for natural pauses. The voice ID controls the speaker.
+- **SFX**: keep it short and concrete. "thunderclap with rolling
+  rumble", "footsteps on wet gravel", "old metal door creaking open".
+  Pass `durationSeconds` if the default 5s isn't right.
+- **Music**: be descriptive about instruments, tempo, mood, and genre.
+  "melancholic lo-fi piano with soft kick drum, 70 bpm" is much better
+  than "sad music". Pass `musicLengthMs` if the default 30s isn't right.
+
+`generate_music` requires beta access on the ElevenLabs plan. If your
+account doesn't have it, the call returns `PROVIDER_REJECTED` (HTTP
+422). Fall back to `upload_audio` with a pre-baked music file.
+
+Errors specific to audio generation:
+
+| Code | HTTP | Means |
+|---|---|---|
+| `BAD_PROMPT` | 400 | Prompt empty / non-string / over 2000 chars |
+| `BAD_DURATION` | 400 | `durationSeconds` or `musicLengthMs` outside the allowed range |
+| `BAD_VOICE` | 400 | Speech only — `voice` is not a valid ElevenLabs voice id |
+| `PROVIDER_REJECTED` | 422 | Content moderation OR account lacks beta access for music |
+
 ## Workflow: collaboratively edit an existing project
 
 When multiple agents work on the same project, use optimistic
@@ -205,6 +250,7 @@ All errors return structured JSON with a `code` field:
 |---|---|---|---|
 | `BAD_REQUEST` | 400 | Missing/malformed field | Fix request shape |
 | `BAD_PROMPT` | 400 | Prompt empty / too short / too long (>2000 chars) | Reword |
+| `BAD_DURATION` | 400 | SFX/music duration outside allowed bounds | Pick a value within range |
 | `BAD_MODEL` | 400 | Unknown model name | Use a listed model |
 | `BAD_BASE64` | 400 | Image/audio base64 didn't decode | Re-encode |
 | `NO_BOARD` | 404 | boardUid doesn't exist | Verify via get_project |
@@ -224,6 +270,8 @@ share URLs, export PDFs.
 Paid per call (default USDC on Base):
 - `generate_panel` — $0.25 (250000 atomic USDC)
 - `generate_speech` — $0.10 (100000 atomic)
+- `generate_sound_effect` — $0.05 (50000 atomic)
+- `generate_music` — $0.20 (200000 atomic)
 
 In local dev / mock mode, everything is free and the mock providers
 return deterministic colored PNGs (for images) and pseudo-waveform WAVs
@@ -294,6 +342,26 @@ capabilities are at `POST /api/agent/*` via direct HTTP — see the
   "kind": "narration",
   "text": "She climbed the spiral stairs as she had every night for forty years, the lamp's glow her only companion.",
   "model": "eleven_turbo_v2_5"
+}
+```
+
+### generate_sound_effect
+```json
+{
+  "projectId": "...",
+  "boardUid": "...",
+  "prompt": "old metal door creaking slowly open, then a soft thud",
+  "durationSeconds": 4
+}
+```
+
+### generate_music
+```json
+{
+  "projectId": "...",
+  "boardUid": "...",
+  "prompt": "melancholic lo-fi piano with soft kick drum and vinyl crackle, 70 bpm",
+  "musicLengthMs": 20000
 }
 ```
 
