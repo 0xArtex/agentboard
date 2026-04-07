@@ -29,6 +29,8 @@ const agents = require('../services/agents');
 const shareTokens = require('../services/share-tokens');
 const imageGen = require('../services/image-gen');
 const tts = require('../services/tts');
+const drawEngine = require('../services/draw-engine');
+const { blobStore } = require('../services/blob-store');
 const pricing = require('../services/pricing');
 const x402Gate = require('../middleware/x402-gate');
 const { frequencyLimiter, dailySpendLimiter } = require('../middleware/rate-limit');
@@ -455,6 +457,207 @@ router.post('/draw', requireProjectAccess('write'), asyncHandler(async (req, res
     return res.status(status).json({ error: { code: err.code, message: err.message } });
   }
 }));
+
+// ── programmatic drawing (server-side rasterization) ─────────────────
+//
+// These two routes let agents draw directly onto a board without having
+// to render image bytes elsewhere first. Both use the draw-engine which
+// runs server-side via @napi-rs/canvas — no headless browser required.
+// Coordinates are normalized [0,1] across the canvas so agents don't
+// need to know the pixel size of the board.
+//
+// Common helper: load the existing layer bytes for overlay mode.
+async function loadLayerBytesForOverlay(projectId, boardUid, layer) {
+  const asset = store.getBoardAsset(projectId, boardUid, 'layer:' + layer);
+  if (!asset) return null;
+  // blobStore.get is async on R2, sync on disk — both return a Buffer
+  // (or null). awaiting a Buffer is harmless so we await unconditionally.
+  const bytes = await blobStore.get(asset.hash);
+  return bytes || null;
+}
+
+// Map a DrawError code to an HTTP status. BAD_DRAW is the umbrella code
+// for any user-input validation failure (bad coords, bad brush, etc).
+function drawErrorStatus(err) {
+  if (err && err.code === 'BAD_DRAW') return 400;
+  return 500;
+}
+
+// POST /api/agent/draw-shapes
+// Body: {
+//   projectId, boardUid,
+//   layer?:    string  (default 'fill')
+//   mode?:     'overlay' | 'replace'  (default 'replace')
+//   shapes:    [{ type, ...props }]
+// }
+//
+// shape types:
+//   { type:'line',     from:[x,y], to:[x,y], stroke?, strokeWidth?, opacity? }
+//   { type:'circle',   center:[x,y], radius:n, stroke?, strokeWidth?, fill?, opacity? }
+//   { type:'rect',     topLeft:[x,y], size:[w,h], stroke?, strokeWidth?, fill?, opacity? }
+//   { type:'arrow',    from:[x,y], to:[x,y], stroke?, strokeWidth?, headSize?, opacity? }
+//   { type:'text',     position:[x,y], text:'...', fontSize?, fontFamily?, fontWeight?, align?, fill?, stroke? }
+//   { type:'polyline', points:[[x,y]...], stroke?, strokeWidth?, smooth?, opacity? }
+//   { type:'polygon',  points:[[x,y]...], stroke?, strokeWidth?, fill?, opacity? }
+//   { type:'bezier',   from, cp1, cp2, to, stroke?, strokeWidth?, opacity? }
+//
+// All coordinates are normalized [0,1]. (0,0)=top-left, (1,1)=bottom-right.
+// Distances/radii are normalized too (a fraction of the canvas width).
+//
+// FREE — no x402 gating, no AI inference involved.
+//
+// Response 201: { hash, size, kind, boardUid, layer, mode, shapeCount }
+router.post('/draw-shapes',
+  frequencyLimiter({ windowMs: 60_000, max: 60 }),
+  requireProjectAccess('write'),
+  asyncHandler(async (req, res) => {
+    const body = req.body || {};
+    const { boardUid, shapes } = body;
+    const layer = body.layer || 'fill';
+    const mode = body.mode || 'replace';
+
+    if (!boardUid) {
+      return res.status(400).json({ error: { code: 'BAD_REQUEST', message: 'boardUid required' } });
+    }
+    if (mode !== 'overlay' && mode !== 'replace') {
+      return res.status(400).json({ error: { code: 'BAD_REQUEST', message: "mode must be 'overlay' or 'replace'" } });
+    }
+
+    // Look up the project so we know its aspectRatio for canvas sizing.
+    const projectResult = await store.getProject(req.projectId);
+    if (!projectResult) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Project not found' } });
+    }
+    const aspectRatio = projectResult.project.aspectRatio || 1.7777;
+
+    // Load the existing layer for overlay mode (null if no layer yet).
+    let baseImage = null;
+    if (mode === 'overlay') {
+      baseImage = await loadLayerBytesForOverlay(req.projectId, boardUid, layer);
+    }
+
+    let pngBytes;
+    try {
+      pngBytes = await drawEngine.renderShapes({ aspectRatio, mode, baseImage, shapes });
+    } catch (err) {
+      if (err instanceof drawEngine.DrawError) {
+        return res.status(drawErrorStatus(err)).json({
+          error: { code: err.code, message: err.message },
+        });
+      }
+      throw err;
+    }
+
+    let stored;
+    try {
+      stored = await store.storeBoardAsset(
+        req.projectId, boardUid, 'layer:' + layer, pngBytes, 'image/png',
+        { source: 'draw-shapes', shapeCount: shapes.length, mode, generatedAt: Date.now() }
+      );
+    } catch (err) {
+      const status = err.code === 'NO_BOARD' ? 404 : (err.code === 'WRONG_PROJECT' ? 403 : 400);
+      return res.status(status).json({ error: { code: err.code, message: err.message } });
+    }
+
+    broadcast(req, 'asset:update', {
+      projectId: req.projectId, boardUid, kind: stored.kind, hash: stored.hash,
+    });
+
+    res.status(201).json({
+      hash: stored.hash,
+      size: stored.size,
+      kind: stored.kind,
+      boardUid,
+      layer,
+      mode,
+      shapeCount: shapes.length,
+    });
+  })
+);
+
+// POST /api/agent/draw-strokes
+// Body: {
+//   projectId, boardUid,
+//   layer?:   string  (default 'fill')
+//   mode?:    'overlay' | 'replace'  (default 'replace')
+//   strokes:  [{ brush, color?, size?, opacity?, points:[[x,y]...] }]
+// }
+//
+// brush: 'pencil' | 'pen' | 'ink' | 'marker' | 'eraser'
+//
+// Each stroke is rasterized via Catmull-Rom path smoothing so even
+// sparse point arrays produce a clean curve. The eraser brush uses
+// destination-out compositing — combine with overlay mode to remove
+// pixels from an existing layer.
+//
+// FREE — no x402 gating.
+//
+// Response 201: { hash, size, kind, boardUid, layer, mode, strokeCount }
+router.post('/draw-strokes',
+  frequencyLimiter({ windowMs: 60_000, max: 60 }),
+  requireProjectAccess('write'),
+  asyncHandler(async (req, res) => {
+    const body = req.body || {};
+    const { boardUid, strokes } = body;
+    const layer = body.layer || 'fill';
+    const mode = body.mode || 'replace';
+
+    if (!boardUid) {
+      return res.status(400).json({ error: { code: 'BAD_REQUEST', message: 'boardUid required' } });
+    }
+    if (mode !== 'overlay' && mode !== 'replace') {
+      return res.status(400).json({ error: { code: 'BAD_REQUEST', message: "mode must be 'overlay' or 'replace'" } });
+    }
+
+    const projectResult = await store.getProject(req.projectId);
+    if (!projectResult) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Project not found' } });
+    }
+    const aspectRatio = projectResult.project.aspectRatio || 1.7777;
+
+    let baseImage = null;
+    if (mode === 'overlay') {
+      baseImage = await loadLayerBytesForOverlay(req.projectId, boardUid, layer);
+    }
+
+    let pngBytes;
+    try {
+      pngBytes = await drawEngine.renderStrokes({ aspectRatio, mode, baseImage, strokes });
+    } catch (err) {
+      if (err instanceof drawEngine.DrawError) {
+        return res.status(drawErrorStatus(err)).json({
+          error: { code: err.code, message: err.message },
+        });
+      }
+      throw err;
+    }
+
+    let stored;
+    try {
+      stored = await store.storeBoardAsset(
+        req.projectId, boardUid, 'layer:' + layer, pngBytes, 'image/png',
+        { source: 'draw-strokes', strokeCount: strokes.length, mode, generatedAt: Date.now() }
+      );
+    } catch (err) {
+      const status = err.code === 'NO_BOARD' ? 404 : (err.code === 'WRONG_PROJECT' ? 403 : 400);
+      return res.status(status).json({ error: { code: err.code, message: err.message } });
+    }
+
+    broadcast(req, 'asset:update', {
+      projectId: req.projectId, boardUid, kind: stored.kind, hash: stored.hash,
+    });
+
+    res.status(201).json({
+      hash: stored.hash,
+      size: stored.size,
+      kind: stored.kind,
+      boardUid,
+      layer,
+      mode,
+      strokeCount: strokes.length,
+    });
+  })
+);
 
 // POST /api/agent/upload-audio
 // Body: {

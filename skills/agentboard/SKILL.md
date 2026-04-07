@@ -26,6 +26,8 @@ can invoke them directly:
 - `generate_speech` (AI TTS — narration / dialogue)
 - `generate_sound_effect` (AI one-shot SFX)
 - `generate_music` (AI music composition)
+- `draw_shapes` (rasterize geometric primitives onto a board layer)
+- `draw_strokes` (rasterize brush strokes onto a board layer)
 - `export_pdf`
 - `get_board_url`, `mint_share_token`
 
@@ -35,6 +37,7 @@ directly at `AGENTBOARD_URL` (default `http://localhost:3456`):
 - `POST /api/agent/create-project` — same shape as `create_storyboard`
 - `POST /api/agent/generate-image`, `/generate-speech`
 - `POST /api/agent/generate-sfx`, `/generate-music`
+- `POST /api/agent/draw-shapes`, `/draw-strokes`
 - `POST /api/agent/draw`, `/upload-audio`
 - `POST /api/agent/export/pdf`
 - `GET /api/agent/project/:id`, `/projects`, `/share/:id`
@@ -226,6 +229,118 @@ REST: `POST /api/agent/upload-audio`. One board can have multiple
 audio kinds simultaneously — narration + music + ambient is a common
 combo for a single panel.
 
+## Drawing on boards programmatically
+
+For when you want to *draw* on a board instead of generating or
+uploading. The server rasterizes your commands via @napi-rs/canvas and
+stores the result as a layer asset — same storage path as
+`upload_image` and `generate_panel`. Free, no AI inference, no x402.
+
+There are two tools, both using **normalized [0,1] coordinates** so you
+never have to think about pixel sizes. `(0,0)` is top-left, `(1,1)` is
+bottom-right. Distances and radii are also normalized to canvas width.
+
+| Tool | Use when |
+|---|---|
+| `draw_shapes` | You want geometric primitives — circles, arrows, text, rectangles, polylines. **This is what you'll use 90% of the time.** Best for annotating an AI-generated panel (circling characters, adding directional arrows, drawing callout labels) or sketching layouts from primitives. |
+| `draw_strokes` | You want freeform brush strokes with a specific brush type. Useful for sketch-style marks, expressive lines, or erasing parts of an existing layer with the eraser brush. |
+
+### Modes
+
+- `mode: "replace"` (default) — start from a blank/transparent canvas.
+  The output is a fresh layer.
+- `mode: "overlay"` — load the existing layer first and draw on top.
+  This is what you want when **annotating** an AI-generated image:
+  call `generate_panel` first, then `draw_shapes` with `mode:"overlay"`
+  on the same `layer:"fill"` to add arrows/circles/labels over it.
+
+### Shape types (for `draw_shapes`)
+
+```
+{ type:"line",     from:[x,y], to:[x,y], stroke?, strokeWidth?, opacity? }
+{ type:"circle",   center:[x,y], radius:n, stroke?, strokeWidth?, fill?, opacity? }
+{ type:"rect",     topLeft:[x,y], size:[w,h], stroke?, strokeWidth?, fill?, opacity? }
+{ type:"arrow",    from:[x,y], to:[x,y], stroke?, strokeWidth?, headSize?, opacity? }
+{ type:"text",     position:[x,y], text:"...", fontSize?, fontFamily?, fontWeight?, align?, baseline?, fill?, stroke? }
+{ type:"polyline", points:[[x,y]...], stroke?, strokeWidth?, smooth?, opacity? }
+{ type:"polygon",  points:[[x,y]...], stroke?, strokeWidth?, fill?, opacity? }
+{ type:"bezier",   from, cp1, cp2, to, stroke?, strokeWidth?, opacity? }
+```
+
+`fontSize` is normalized — `0.05` means "5% of the canvas height".
+`align` is `"left" | "center" | "right"`. Strings for `stroke`/`fill`
+accept any CSS color (`"#cc0000"`, `"red"`, `"rgba(0,100,200,0.7)"`).
+
+### Brush types (for `draw_strokes`)
+
+| Brush | Looks like | Defaults |
+|---|---|---|
+| `pencil` | Soft, slightly translucent narrow line | size 4, opacity 0.85, color #222 |
+| `pen` | Clean opaque line | size 3, opacity 1.0, color #000 |
+| `ink` | Heavy bold line | size 6, opacity 1.0, color #000 |
+| `marker` | Wide translucent multiply-blend | size 16, opacity 0.5, color #222 |
+| `eraser` | Removes pixels (destination-out) | size 20, opacity 1.0 |
+
+Pair `eraser` with `mode:"overlay"` to remove specific regions of an
+existing layer. The points you pass become the eraser path.
+
+Stroke point arrays are smoothed via Catmull-Rom interpolation, so even
+sparse arrays like `[[0.1,0.5],[0.5,0.4],[0.9,0.5]]` produce a clean
+hand-drawn-looking curve. You don't need to pass dense polylines.
+
+### Common pattern: annotate an AI-generated panel
+
+```
+1. generate_panel({ projectId, boardUid, layer:"fill", prompt:"...", style:"storyboard-sketch" })
+   → fal.ai produces an image, stored as the fill layer
+
+2. draw_shapes({
+     projectId, boardUid,
+     layer:"fill", mode:"overlay",
+     shapes: [
+       { type:"circle", center:[0.35, 0.45], radius:0.08, stroke:"#cc0000", strokeWidth:6 },
+       { type:"arrow",  from:[0.7, 0.3], to:[0.5, 0.5],   stroke:"#cc0000", strokeWidth:6 },
+       { type:"text",   position:[0.05, 0.05], text:"HERO ENTERS", fontSize:0.04, fill:"#cc0000" },
+     ]
+   })
+   → reads the AI image from disk, composites the annotations on top,
+     stores the result back as the same fill layer
+```
+
+### Common pattern: sketch a layout from scratch
+
+```
+draw_shapes({
+  projectId, boardUid, mode:"replace",
+  shapes: [
+    { type:"rect", topLeft:[0.05,0.05], size:[0.9,0.9], stroke:"#000", strokeWidth:6 },     // frame
+    { type:"line", from:[0.5,0.05], to:[0.5,0.95], stroke:"#888", strokeWidth:2 },          // center vertical
+    { type:"line", from:[0.05,0.5], to:[0.95,0.5], stroke:"#888", strokeWidth:2 },          // center horizontal
+    { type:"circle", center:[0.33,0.6], radius:0.08, stroke:"#000", strokeWidth:4 },        // character head
+    { type:"text", position:[0.5,0.92], text:"WIDE — DAY", fontSize:0.04, align:"center" }, // slug
+  ]
+})
+```
+
+### Layer choice
+
+The default `layer` is `"fill"`. Other layers (composited bottom→top):
+`tone` → `pencil` → `ink` → `notes`. Plus `reference` as a separate
+slot. For most agent use cases, just draw on `fill` and let it be the
+single visible layer. Use other layers if you specifically want to
+separate concerns: e.g. AI image on `fill`, annotations on `notes`.
+
+### Validation errors (`BAD_DRAW`)
+
+| Cause | Fix |
+|---|---|
+| Coordinate outside `[0, 1]` | Clamp to range |
+| Unknown brush / shape type | Use one from the lists above |
+| Empty `strokes` or `shapes` array | Pass at least one |
+| Brush `size` outside `0-200 px` | Pick a smaller brush |
+| `opacity` outside `[0, 1]` | Clamp |
+| Stroke with empty `points` | Add at least one point |
+
 ## Audio: speech, sound effects, and music
 
 AgentBoard exposes three independent audio generation tools, each backed
@@ -318,6 +433,7 @@ All errors return structured JSON with a `code` field:
 | `BAD_PROMPT` | 400 | Prompt outside length bounds. Image gen: 2-2000 chars. SFX/music: 1-4100 chars. Speech: 1-5000 chars. | Reword to fit |
 | `BAD_DURATION` | 400 | SFX/music duration outside allowed bounds | Pick a value within range |
 | `BAD_STYLE` | 400 | Unknown image style preset | Call list_image_styles |
+| `BAD_DRAW` | 400 | Drawing command failed validation (out-of-range coords, unknown brush/shape, oversized array) | Fix the offending field |
 | `BAD_MODEL` | 400 | Unknown model name | Use a listed model |
 | `BAD_BASE64` | 400 | Image/audio base64 didn't decode | Re-encode |
 | `NO_BOARD` | 404 | boardUid doesn't exist | Verify via get_project |
@@ -461,6 +577,35 @@ capabilities are at `POST /api/agent/*` via direct HTTP — see the
 ```
 Returns `{ styles: [{ name, title, description, hasReferences, preferredModel }, ...] }`. Call before generate_panel if you're unsure which style to pick.
 
+### draw_shapes (annotate an AI panel)
+```json
+{
+  "projectId": "...",
+  "boardUid": "...",
+  "layer": "fill",
+  "mode": "overlay",
+  "shapes": [
+    { "type": "circle", "center": [0.35, 0.45], "radius": 0.08, "stroke": "#cc0000", "strokeWidth": 6 },
+    { "type": "arrow",  "from": [0.7, 0.3], "to": [0.5, 0.5], "stroke": "#cc0000", "strokeWidth": 6 },
+    { "type": "text",   "position": [0.05, 0.05], "text": "HERO ENTERS", "fontSize": 0.04, "fill": "#cc0000" }
+  ]
+}
+```
+
+### draw_strokes (sketch with brushes)
+```json
+{
+  "projectId": "...",
+  "boardUid": "...",
+  "layer": "pencil",
+  "mode": "replace",
+  "strokes": [
+    { "brush": "pencil", "color": "#222", "size": 5, "points": [[0.1, 0.5], [0.3, 0.4], [0.5, 0.5], [0.7, 0.6], [0.9, 0.5]] },
+    { "brush": "ink",    "color": "#000", "size": 8, "points": [[0.2, 0.7], [0.5, 0.7], [0.8, 0.7]] }
+  ]
+}
+```
+
 ### set_metadata (batch update)
 ```json
 {
@@ -488,9 +633,10 @@ Don't invoke for:
 - Generic TTS / music / SFX without a storyboard context — if you just
   want a single audio clip with no board to attach it to, call the
   audio provider directly
-- Stroke-command / brush-based drawing from a canvas — AgentBoard only
-  accepts pre-rendered image bytes via `upload_image`. True
-  programmatic stroke drawing is deferred to a future version
+- Pixel-perfect raster painting that requires interactive feedback —
+  AgentBoard's drawing API rasterizes shapes/strokes server-side from
+  high-level commands. It's great for annotations and sketch layouts,
+  but it's not a substitute for a human artist with a tablet
 
 Invoke when the user wants **an ordered sequence of visual panels**
 with text metadata, optional audio, and shareable output. That's the

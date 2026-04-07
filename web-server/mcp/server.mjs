@@ -41,6 +41,8 @@
  *   - generate_speech         AI text-to-speech (ElevenLabs, x402-gated)
  *   - generate_sound_effect   AI sound effect generation (ElevenLabs, x402-gated)
  *   - generate_music          AI music composition (ElevenLabs, x402-gated)
+ *   - draw_shapes             rasterize geometric shapes onto a board layer (free)
+ *   - draw_strokes            rasterize brush strokes onto a board layer (free)
  *   - export_pdf              download the project as a PDF buffer
  *   - get_board_url           generate a shareable view URL
  *   - mint_share_token        create a time-limited share token
@@ -481,6 +483,84 @@ server.registerTool(
   },
   handle(async (args) => {
     const result = await apiRequest('POST', '/api/agent/generate-music', args);
+    return okText(result);
+  })
+);
+
+// ── tool: draw_shapes ──────────────────────────────────────────────────
+server.registerTool(
+  'draw_shapes',
+  {
+    title: 'Draw geometric shapes onto a board layer',
+    description:
+      'Rasterize an array of high-level shapes (line, circle, rect, arrow, text, ' +
+      'polyline, polygon, bezier) onto a board layer. This is the right tool for ' +
+      'annotating an AI-generated panel — circling characters, adding directional ' +
+      'arrows for camera/character motion, drawing callout labels, framing marks, ' +
+      'composition guides — or for sketching simple layouts from primitives. ' +
+      'Coordinates are normalized [0,1]: (0,0) is top-left, (1,1) is bottom-right. ' +
+      'Use mode="overlay" to composite on top of an existing layer (most common when ' +
+      'annotating an AI image), or mode="replace" to start from a blank canvas. ' +
+      'FREE — runs server-side via @napi-rs/canvas, no AI inference and no x402.',
+    inputSchema: {
+      projectId: z.string(),
+      boardUid: z.string(),
+      layer: z.string().optional().describe('Target layer (default "fill"). Other layers: tone, pencil, ink, notes, reference.'),
+      mode: z.enum(['overlay', 'replace']).optional().describe('overlay = draw on top of existing layer. replace = start fresh. Default replace.'),
+      shapes: z.array(z.object({
+        type: z.enum(['line', 'circle', 'rect', 'arrow', 'text', 'polyline', 'polygon', 'bezier']),
+      }).passthrough()).describe(
+        'Array of shape descriptors. Each shape needs a "type" plus geometry. ' +
+        'Examples: ' +
+        '{type:"circle",center:[0.5,0.5],radius:0.1,stroke:"red",strokeWidth:6} | ' +
+        '{type:"arrow",from:[0.1,0.5],to:[0.9,0.5],stroke:"#0066cc",strokeWidth:8} | ' +
+        '{type:"text",position:[0.5,0.05],text:"WIDE SHOT",fontSize:0.05,fill:"black",align:"center"} | ' +
+        '{type:"rect",topLeft:[0.1,0.2],size:[0.8,0.6],stroke:"black",strokeWidth:4} | ' +
+        '{type:"polyline",points:[[0.1,0.5],[0.3,0.4],[0.5,0.5]],stroke:"black",strokeWidth:5}'
+      ),
+    },
+  },
+  handle(async (args) => {
+    const result = await apiRequest('POST', '/api/agent/draw-shapes', args);
+    return okText(result);
+  })
+);
+
+// ── tool: draw_strokes ─────────────────────────────────────────────────
+server.registerTool(
+  'draw_strokes',
+  {
+    title: 'Draw brush strokes onto a board layer',
+    description:
+      'Rasterize an array of brush strokes onto a board layer. Use this when ' +
+      'draw_shapes does not give enough control — for sketch-style freeform marks, ' +
+      'expressive lines, or erasing parts of an existing layer. Each stroke is a ' +
+      'list of [x,y] points which the engine smooths into a clean curve via ' +
+      'Catmull-Rom interpolation, so even sparse point arrays look hand-drawn. ' +
+      'Brushes: pencil (soft, slightly translucent), pen (clean opaque line), ' +
+      'ink (heavy bold line), marker (translucent multiply blend), eraser (removes ' +
+      'pixels — pair with mode="overlay" to erase parts of an existing image). ' +
+      'Coordinates are normalized [0,1]. FREE — no AI, no x402.',
+    inputSchema: {
+      projectId: z.string(),
+      boardUid: z.string(),
+      layer: z.string().optional().describe('Target layer (default "fill")'),
+      mode: z.enum(['overlay', 'replace']).optional().describe('overlay = on top of existing. replace = blank canvas. Default replace.'),
+      strokes: z.array(z.object({
+        brush: z.enum(['pencil', 'pen', 'ink', 'marker', 'eraser']).optional(),
+        color: z.string().optional().describe('CSS color (default per brush)'),
+        size: z.number().optional().describe('Brush size in pixels (default per brush, max 200)'),
+        opacity: z.number().optional().describe('0-1 (default per brush)'),
+        points: z.array(z.array(z.number())).describe('Array of [x,y] points in [0,1] coordinates'),
+      })).describe(
+        'Array of strokes. Example: ' +
+        '[{brush:"pencil",color:"#222",size:5,points:[[0.1,0.5],[0.3,0.4],[0.5,0.5],[0.7,0.6],[0.9,0.5]]}, ' +
+        '{brush:"eraser",size:30,points:[[0.4,0.4],[0.5,0.5]]}]'
+      ),
+    },
+  },
+  handle(async (args) => {
+    const result = await apiRequest('POST', '/api/agent/draw-strokes', args);
     return okText(result);
   })
 );
