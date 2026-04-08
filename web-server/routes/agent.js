@@ -227,7 +227,13 @@ function requireProjectAccess(level) {
 //   }
 //
 // Returns: { id, project, viewUrl, apiUrl }
-router.post('/create-project', asyncHandler(async (req, res) => {
+//
+// Rate-limited to 50/hour per IP + per agent token. That's enough for
+// heavy automated use (one project every ~72 seconds) while catching
+// runaway scripts. Returns 429 when exceeded.
+router.post('/create-project',
+  frequencyLimiter({ windowMs: 60 * 60 * 1000, max: 50 }),
+  asyncHandler(async (req, res) => {
   const body = req.body || {};
   const { id } = await store.createProject({
     aspectRatio: body.aspectRatio,

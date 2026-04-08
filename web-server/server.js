@@ -17,11 +17,9 @@ const { setupSocketHandler } = require('./services/socket-handler');
 // Routes
 const projectsRouter = require('./routes/projects');
 const filesRouter = require('./routes/files');
-const exportRouter = require('./routes/export');
 const prefsRouter = require('./routes/prefs');
 const agentRouter = require('./routes/agent');
 const agentsRouter = require('./routes/agents');
-const appRouter = require('./routes/app');
 
 // Agent auth middleware — stamps req.agent on every request
 const { agentAuthMiddleware } = require('./middleware/agent-auth');
@@ -64,16 +62,13 @@ app.use('/api', agentAuthMiddleware);
 // ── Ensure data directories exist ──
 const DATA_DIR = path.join(__dirname, 'data');
 fs.ensureDirSync(path.join(DATA_DIR, 'projects'));
-fs.ensureDirSync(path.join(DATA_DIR, 'exports'));
 
 // ── API Routes ──
 app.use('/api/projects', projectsRouter);
 app.use('/api/projects', filesRouter);
-app.use('/api/projects', exportRouter);
 app.use('/api/prefs', prefsRouter);
 app.use('/api/agent', agentRouter);
 app.use('/api/agents', agentsRouter);
-app.use('/api/app', appRouter);
 
 // ── Health check ──
 // Returns operational status plus a fingerprint of which providers and
