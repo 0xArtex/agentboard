@@ -1,11 +1,11 @@
 ---
 name: agentboard
-description: Build multi-panel storyboards programmatically — create projects, upload images/audio to boards, composite annotations, export PDFs, share via public URL. Invoke when the user wants a storyboard, pre-visualization, shot breakdown, animatic, or any ordered sequence of visual panels with text. Hosted at https://agentboard.fly.dev (override with AGENTBOARD_URL for local dev). Works over REST from any agent; MCP tools (mcp__agentboard__*) available in compatible runtimes. If you have your own image/audio generator, use it and UPLOAD the bytes — fallback generators (fal.ai, ElevenLabs) exist only for agents without built-in generation.
+description: Build multi-panel storyboards programmatically — create projects, upload images/audio to boards, composite annotations, export PDFs, share via public URL. Invoke when the user wants a storyboard, pre-visualization, shot breakdown, animatic, or any ordered sequence of visual panels with text. Hosted at https://agentboard.fly.dev. Works over REST from any agent; MCP tools (mcp__agentboard__*) available in compatible runtimes. If you have your own image/audio generator, use it and UPLOAD the bytes — optional server-side generation endpoints exist as a fallback only for agents without built-in generation.
 ---
 
 # AgentBoard
 
-Base URL: `https://agentboard.fly.dev`. All examples below use REST. MCP tools accept the same argument shapes — same field names, same JSON structure.
+Base URL: `https://agentboard.fly.dev`. All examples below use REST. MCP tools accept the same argument shapes — same field names, same JSON structure. No client credentials are required to call the hosted endpoints.
 
 ## Data model
 
@@ -64,9 +64,9 @@ Up to 100 items per call, mixing images and audio freely. Partial failures don't
 
 | Field | What | Use for |
 |---|---|---|
-| `imagePath` / `audioPath` | Local file path | Preferred — MCP subprocess reads it, bytes never touch agent context |
-| `imageUrl` / `audioUrl` | http/https URL | Remote CDN links (e.g. fal.ai output URLs) — MCP fetches, zero context cost |
-| `imageBase64` / `audioBase64` | Inline base64 | Only for tiny images (<10 KB). Burns agent context at 1.33× file size |
+| `imagePath` / `audioPath` | Local file path | Preferred when the user has explicitly produced or pointed at a file. MCP subprocess reads and uploads the bytes. Never reference paths the user didn't authorize. |
+| `imageUrl` / `audioUrl` | http/https URL | Remote CDN links (the MCP subprocess fetches them). Zero agent context cost. |
+| `imageBase64` / `audioBase64` | Inline base64 | Only for tiny images (<10 KB). Burns agent context at 1.33× file size. |
 
 ### Single upload
 
@@ -142,22 +142,22 @@ Optimistic concurrency via `expectedVersion`. On 409 `VERSION_MISMATCH`: `GET /a
 
 Append boards later with `POST /api/agent/add-scene` (batch, body: `{ projectId, boards: [...] }`) or `POST /api/agent/add-board` (single).
 
-## Fallback generation (skip if you can generate)
+## Optional server-side generation (skip if you can generate)
 
-Only for agents without built-in image/audio generation. Uploading your own bytes is cheaper, faster, and avoids server-side API key dependencies. x402-gated in production.
+Only for agents without built-in image/audio generation. Uploading your own bytes via the primary workflow is faster and more reliable; these endpoints exist as a fallback. Any required provider configuration is handled server-side — the agent supplies only the request payload below.
 
 | Endpoint | Purpose | Key fields |
 |---|---|---|
-| `POST /api/agent/generate-image` | fal.ai image | `prompt`, `style?`, `quality?`, `model?` |
-| `POST /api/agent/generate-speech` | ElevenLabs TTS | `text`, `voice?` |
-| `POST /api/agent/generate-sfx` | ElevenLabs SFX | `prompt`, `durationSeconds?` (0.5–22) |
-| `POST /api/agent/generate-music` | ElevenLabs music | `prompt`, `musicLengthMs?` (3000–600000) |
+| `POST /api/agent/generate-image` | AI image | `prompt`, `style?`, `quality?`, `model?` |
+| `POST /api/agent/generate-speech` | Text-to-speech | `text`, `voice?` |
+| `POST /api/agent/generate-sfx` | Sound effect | `prompt`, `durationSeconds?` (0.5–22) |
+| `POST /api/agent/generate-music` | Music | `prompt`, `musicLengthMs?` (3000–600000) |
 
 **Style presets** (pass `style`): `storyboard-sketch`, `cinematic-color`, `comic-panel`. Enumerate via `GET /api/agent/image-styles`.
 
-**Quality tiers** (pass `quality`): `low` (draft/cheap) | `medium` (balanced default) | `high` (final render). Project-level default settable on `create-project`.
+**Quality tiers** (pass `quality`): `low` (draft) | `medium` (balanced default) | `high` (final render). Project-level default settable on `create-project`.
 
-**Voice lookup** — call `GET /api/agent/voices` **before** `generate-speech`. Free-tier ElevenLabs accounts must explicitly add voices at https://elevenlabs.io/app/voice-library or every TTS call returns 422 `PROVIDER_REJECTED`.
+**Voice lookup** — call `GET /api/agent/voices` **before** `generate-speech` to see which voices the server is configured to use.
 
 ## Errors
 
