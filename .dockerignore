@@ -28,15 +28,22 @@ web-server/data
 # ── The entire Electron/desktop Storyboarder stack we don't ship ──
 # These directories are the legacy desktop app. AgentBoard the server
 # doesn't need any of them at runtime.
-electron
-build
-test
-dist
-release
-app
-backups
-storyboards
-store
+#
+# IMPORTANT: every pattern here is anchored with a leading slash so it
+# ONLY matches the root-level directory. A bare pattern like `build`
+# would silently exclude src/build/ (the 2.6 MB webpack bundle), which
+# breaks the web UI served at /. Same for dist (src/js/vendor/*/dist),
+# app (src/data/app), and store (src/js/shared/store). Do not remove
+# the leading slashes.
+/electron
+/build
+/test
+/dist
+/release
+/app
+/backups
+/storyboards
+/store
 
 # Webpack configs for the desktop bundles we don't serve.
 configs/xr
@@ -57,12 +64,12 @@ CONTRIBUTING*
 DEVELOPERS*
 NOTES.local.md
 README*.md
-docs
-examples
+/docs
+/examples
 
 # The agent skill file is useful as a reference but doesn't belong in
 # the server image — it's loaded into the MCP client, not the server.
-skills
+/skills
 
 # Build artifacts and tooling config at the repo root.
 Dockerfile
