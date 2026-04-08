@@ -971,14 +971,14 @@ const loadBoardUI = async () => {
   window.ondragleave = () => { return false }
   window.ondragend = () => { return false }
 
-  window.ondrop = e => {
+  window.ondrop = async e => {
     e.preventDefault()
 
     if (!e || !e.dataTransfer || !e.dataTransfer.files || !e.dataTransfer.files.length) {
       return
     }
 
-    let files = e.dataTransfer.files
+    let files = Array.from(e.dataTransfer.files)
 
     for (let file of files) {
       if (path.extname(file.name).match(/\.aif*/)) {
@@ -991,27 +991,56 @@ const loadBoardUI = async () => {
         hasRecognizedExtension &&
         audioPlayback.supportsType(file.name)
       ) {
+        // Audio drop relies on a real filesystem path — desktop-only.
+        // Browser File objects have no .path; silently bail there.
+        if (!file.path) {
+          notifications.notify({ message: `Audio drop is only supported in the desktop app.`, timing: 5 })
+          return
+        }
         notifications.notify({ message: `Copying audio file\n${file.name}`, timing: 5 })
         audioFileControlView.onSelectFile(file.path)
         return
       }
     }
 
+    // Split: .storyboarder project files (desktop only) vs. regular images.
     let hasStoryboarderFile = false
-    let filepaths = []
+    let imageFiles = []
     for (let file of files) {
       if (file.name.indexOf(".storyboarder") > -1) {
         hasStoryboarderFile = true
+        if (!file.path) {
+          notifications.notify({ message: `Opening .storyboarder files is only supported in the desktop app.`, timing: 5 })
+          return
+        }
         // force load
         ipcRenderer.send('openFile', file.path)
         break
       } else {
-        filepaths.push(file.path)
+        imageFiles.push(file)
       }
     }
 
-    if (!hasStoryboarderFile) {
-      insertNewBoardsWithFiles(sortFilePaths(filepaths))
+    if (hasStoryboarderFile || !imageFiles.length) return
+
+    // Desktop: File.path is present, keep the existing fs-based path.
+    // Browser: no File.path — read bytes via FileReader and insert via
+    // data URL. Both routes land in the same insertion pipeline
+    // (fitImageData → insertNewBoardDataAtPosition → saveDataURLtoFile),
+    // the fs shim takes care of POSTing the saved bytes to the server.
+    if (imageFiles[0].path) {
+      insertNewBoardsWithFiles(sortFilePaths(imageFiles.map(f => f.path)))
+    } else {
+      imageFiles.sort((a, b) => a.name.localeCompare(b.name))
+      try {
+        let items = await Promise.all(
+          imageFiles.map(async f => ({ dataURL: await readFileAsDataURL(f), name: f.name }))
+        )
+        insertNewBoardsWithDataURLs(items)
+      } catch (err) {
+        log.error('Error reading dropped files', err)
+        notifications.notify({ message: `Could not read dropped files: ${err.message}`, timing: 10 })
+      }
     }
   }
 
@@ -2288,6 +2317,83 @@ let newBoard = async (position, shouldAddToUndoStack = true) => {
   }
 
   return position
+}
+
+// Browser-only: read a dropped File as a data URL. Used by window.ondrop
+// in the web build where File.path is undefined and fs can't see the file.
+let readFileAsDataURL = file => new Promise((resolve, reject) => {
+  const reader = new FileReader()
+  reader.onload = () => resolve(reader.result)
+  reader.onerror = () => reject(reader.error || new Error('FileReader failed'))
+  reader.readAsDataURL(file)
+})
+
+// Called from window.ondrop in the web build. Mirrors
+// insertNewBoardsWithFiles but starts from already-loaded data URLs
+// (bypassing loadImageFileAsDataURL, which is fs-based).
+let insertNewBoardsWithDataURLs = async items => {
+  log.info('main-window#insertNewBoardsWithDataURLs')
+
+  let count = items.length
+  notifications.notify({
+    message: `Importing ${count} image${count !== 1 ? 's' : ''}.\nPlease wait …`,
+    timing: 2
+  })
+
+  let insertionIndex = currentBoard + 1
+  let numAdded = 0
+  for (let { dataURL, name } of items) {
+    try {
+      if (dataURL == null) {
+        throw new Error(`Could not read image file ${name}`)
+      }
+
+      // resize image if too big
+      let dim = [
+        storyboarderSketchPane.sketchPane.width,
+        storyboarderSketchPane.sketchPane.height
+      ]
+      const scaledImageData = await fitImageData(dim, dataURL)
+
+      storeUndoStateForScene(true)
+      let board = insertNewBoardDataAtPosition(insertionIndex)
+      board.layers.reference = {
+        ...board.layers.reference,
+        url: boardModel.boardFilenameForLayer(board, 'reference'),
+        opacity: 1.0
+      }
+      storeUndoStateForScene()
+      saveDataURLtoFile(scaledImageData, board.layers.reference.url)
+
+      await savePosterFrame(board, true)
+      await saveThumbnailFile(insertionIndex, { forceReadFromFiles: true })
+
+      markBoardFileDirty()
+
+      insertionIndex++
+      numAdded++
+    } catch (error) {
+      log.error('Error loading image', error)
+      notifications.notify({
+        message: `Could not load image ${name}\n` + error.message,
+        timing: 10
+      })
+    }
+  }
+
+  renderThumbnailDrawer()
+
+  if (numAdded > 0) {
+    notifications.notify({
+      message: `Imported ${numAdded} image${numAdded !== 1 ? 's' : ''}.\n\n` +
+              `The image${numAdded !== 1 ? 's are' : ' is'} on the reference layer, ` +
+              `so you can draw over ${numAdded !== 1 ? 'them' : 'it'}. ` +
+              `If you'd like ${numAdded !== 1 ? 'them' : 'it'} to be the main layer, ` +
+              `you can merge ${numAdded !== 1 ? 'them' : 'it'} up on the sidebar`,
+      timing: 10
+    })
+    sfx.positive()
+  }
 }
 
 // Called from "Import Images to New Boards…" or from window.ondrop
