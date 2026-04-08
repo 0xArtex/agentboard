@@ -136,6 +136,13 @@ function requireProjectAccess(level) {
 //     aspectRatio?: number,                   // default 1.7777
 //     fps?: number,                           // default 24
 //     defaultBoardTiming?: number,            // default 2000 (ms)
+//     quality?: 'low' | 'medium' | 'high',    // project-level default image
+//                                             // quality tier. Affects which fal
+//                                             // model generate_panel calls use
+//                                             // when no explicit model is given.
+//                                             // low=z-image-turbo (draft),
+//                                             // medium=flux-2-pro (default),
+//                                             // high=seedream-v5-lite (final).
 //     boards?: [{
 //       dialogue?, action?, notes?,
 //       duration?, newShot?, shot?,
@@ -153,9 +160,20 @@ router.post('/create-project', asyncHandler(async (req, res) => {
     ownerId: req.agent.userId,
   });
 
-  // If a title was supplied, tuck it into project meta
-  if (body.title) {
-    await store.updateProject(id, { meta: { title: body.title } });
+  // Collect optional project-level metadata into a single update call.
+  const meta = {};
+  if (body.title) meta.title = body.title;
+  if (body.quality) {
+    const q = String(body.quality).toLowerCase();
+    if (!['low', 'medium', 'high'].includes(q)) {
+      return res.status(400).json({
+        error: { code: 'BAD_REQUEST', message: `quality must be 'low' | 'medium' | 'high'` },
+      });
+    }
+    meta.quality = q;
+  }
+  if (Object.keys(meta).length > 0) {
+    await store.updateProject(id, { meta });
   }
 
   // Add any boards the caller pre-declared
@@ -709,28 +727,35 @@ router.post('/upload-audio', requireProjectAccess('write'), asyncHandler(async (
 //   boardUid:      string   (required)
 //   layer:         string   (optional, default 'fill')
 //   prompt:        string   (required, 2-2000 chars)
-//   model?:        string   (default 'flux-2-pro'; provider-specific.
-//                             Known: flux-schnell, flux-dev, flux-pro,
-//                             flux-pro-v1.1, flux-pro-ultra, flux-kontext,
-//                             flux-kontext-max, flux-kontext-multi,
-//                             flux-2-pro, sdxl, stable-diffusion-3.5)
-//   style?:        string   (optional — named preset from config/image-styles.json.
+//   model?:        string   (explicit model override — wins over style
+//                             and quality. Known: z-image-turbo,
+//                             flux-schnell, flux-dev, flux-pro, flux-pro-v1.1,
+//                             flux-pro-ultra, flux-kontext, flux-kontext-max,
+//                             flux-kontext-multi, flux-2-pro, seedream-v5-lite,
+//                             sdxl, stable-diffusion-3.5)
+//   style?:        string   (named preset from config/image-styles.json.
 //                             When set, prepends the preset's systemPrompt, loads
 //                             its reference images, and auto-selects the preferred
 //                             model. Current presets: 'storyboard-sketch',
-//                             'cinematic-color', 'comic-panel'. Use 'storyboard-sketch'
-//                             for the classic B&W rough-sketch look.)
+//                             'cinematic-color', 'comic-panel'.)
+//   quality?:      'low' | 'medium' | 'high' — per-call quality override.
+//                             Resolves to a concrete model: low→z-image-turbo,
+//                             medium→flux-2-pro, high→seedream-v5-lite.
+//                             If unset, falls back to the project's quality.
 //   aspectRatio?:  number   (default: the project's aspectRatio)
 //   seed?:         number
 //   negativePrompt?: string
 //   steps?:        number
 // }
 //
+// Model resolution order: model > style.preferredModel > quality >
+//   project.meta.quality > default (flux-2-pro).
+//
 // Gated by x402 in prod (0.25 USDC default). Generated image is stored as
 // a layer asset on the target board with provider metadata (prompt, seed,
-// model, style) tucked into the board_assets meta JSON for future reference.
+// model, style, quality) tucked into the board_assets meta JSON for future reference.
 //
-// Response 201: { hash, size, kind, boardUid, provider, model, prompt, style?, imageUrl }
+// Response 201: { hash, size, kind, boardUid, provider, model, quality?, prompt, style?, imageUrl }
 router.post('/generate-image',
   frequencyLimiter({ windowMs: 60_000, max: 20 }),
   x402Gate({
@@ -756,6 +781,17 @@ router.post('/generate-image',
       return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Project not found' } });
     }
     const aspectRatio = body.aspectRatio || projectResult.project.aspectRatio;
+    // Pull the project's stored quality tier (if any). Per-call `quality`
+    // in the body wins over this — that's handled inside generateImage.
+    const projectQuality = (projectResult.project.meta && projectResult.project.meta.quality) || null;
+
+    // Validate per-call quality if provided
+    if (body.quality && !['low', 'medium', 'high'].includes(String(body.quality).toLowerCase())) {
+      if (req.x402Payment) req.x402Payment.markFailed(new Error('bad quality'));
+      return res.status(400).json({
+        error: { code: 'BAD_REQUEST', message: `quality must be 'low' | 'medium' | 'high'` },
+      });
+    }
 
     // Generate
     let result;
@@ -764,6 +800,8 @@ router.post('/generate-image',
         prompt,
         aspectRatio,
         model: body.model,
+        quality: body.quality,
+        projectQuality,
         seed: body.seed,
         negativePrompt: body.negativePrompt,
         steps: body.steps,
@@ -803,6 +841,7 @@ router.post('/generate-image',
           prompt: result.providerMeta.prompt,
           provider: result.providerMeta.provider,
           model: result.providerMeta.model,
+          quality: result.providerMeta.quality || null,
           seed: result.providerMeta.seed,
           style: result.providerMeta.style || null,
           referenceCount: result.providerMeta.referenceCount || 0,
@@ -829,6 +868,7 @@ router.post('/generate-image',
       boardUid,
       provider: result.providerMeta.provider,
       model: result.providerMeta.model,
+      quality: result.providerMeta.quality || null,
       prompt: result.providerMeta.prompt,
       style: result.providerMeta.style || null,
       referenceCount: result.providerMeta.referenceCount || 0,

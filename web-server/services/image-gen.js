@@ -171,6 +171,21 @@ const FAL_MODEL_PATHS = {
   // ── non-Flux alternatives ──
   'sdxl':            'fal-ai/fast-sdxl',
   'stable-diffusion-3.5': 'fal-ai/stable-diffusion-v35-large',
+
+  // Z-Image Turbo — cheap, fast draft-quality text-to-image. The "low"
+  // quality tier. Lightweight, no reference image support, no inference
+  // step tuning. Standard fal sync body shape (prompt, image_size, seed,
+  // negative_prompt, num_images).
+  'z-image-turbo':   'fal-ai/z-image/turbo',
+
+  // Seedream 5.0 Lite (ByteDance) — top quality tier. Slower and more
+  // expensive than flux-2-pro, used for final-render quality. The path
+  // includes an explicit /text-to-image suffix that other fal models
+  // don't — verified from fal's official docs page for seedream v5 lite.
+  // Accepts { prompt } at minimum; other body fields are model-specific
+  // and we pass the standard ones (image_size, seed, negative_prompt)
+  // which fal ignores gracefully if unsupported.
+  'seedream-v5-lite': 'fal-ai/bytedance/seedream/v5/lite/text-to-image',
 };
 // flux-2-pro is the flagship text-to-image model: highest quality,
 // prompt adherence, and typography. It's the right default for a
@@ -178,6 +193,39 @@ const FAL_MODEL_PATHS = {
 // Callers who want cheaper/faster can still pass model:"flux-schnell"
 // explicitly. Style presets override this via `preferredModel`.
 const DEFAULT_FAL_MODEL = 'flux-2-pro';
+
+// ── quality tier → model resolution ───────────────────────────────────
+//
+// Project-level quality setting lets callers pick a tier without having
+// to know specific model names. Three tiers:
+//
+//   low    — draft-speed, cheapest. Used for quick iteration, thumbnails,
+//            when the agent is still exploring composition.
+//   medium — balanced (default). Good quality, reasonable cost.
+//   high   — flagship render. Used for final panels.
+//
+// Resolution priority inside generateImage():
+//   1. explicit opts.model (takes precedence over everything)
+//   2. style preset's preferredModel (if a style was passed)
+//   3. explicit opts.quality (per-call override)
+//   4. project.meta.quality (set when the storyboard was created)
+//   5. DEFAULT_FAL_MODEL (flux-2-pro)
+//
+const QUALITY_TO_MODEL = {
+  low:    'z-image-turbo',
+  medium: 'flux-2-pro',
+  high:   'seedream-v5-lite',
+};
+
+/**
+ * Turn a quality tier string into a model key. Returns null if the
+ * quality value is absent or unrecognized so the caller can fall through
+ * to the next resolution rule.
+ */
+function modelForQuality(quality) {
+  if (!quality) return null;
+  return QUALITY_TO_MODEL[String(quality).toLowerCase()] || null;
+}
 
 // Models that accept reference images via image_url / image_urls in the
 // request body. When the caller passes references but picks a model NOT
@@ -309,10 +357,21 @@ class FalAiImageGenProvider extends ImageGenProvider {
       throw new ImageGenError('PROVIDER_MALFORMED', 'fal.ai returned non-JSON response', { cause: err });
     }
 
-    const image = json && Array.isArray(json.images) && json.images[0];
+    // Most fal models return { images: [{ url, width, height, content_type }] }
+    // but a few newer ones (e.g. seedream v5 lite) return { image: { url } }
+    // or just { url }. Accept all three shapes so adding a new model
+    // doesn't require a special-case parser.
+    let image = null;
+    if (json && Array.isArray(json.images) && json.images[0]) {
+      image = json.images[0];
+    } else if (json && json.image && typeof json.image.url === 'string') {
+      image = json.image;
+    } else if (json && typeof json.url === 'string') {
+      image = { url: json.url };
+    }
     if (!image || typeof image.url !== 'string') {
       throw new ImageGenError('PROVIDER_MALFORMED',
-        'fal.ai response missing images[0].url',
+        `fal.ai ${modelPath} response missing image url (keys: ${json ? Object.keys(json).join(',') : 'none'})`,
         { providerMeta: json });
     }
 
@@ -398,17 +457,24 @@ function getProvider() {
 function resetProvider() { _provider = null; }
 
 /**
- * High-level entrypoint. Handles style preset resolution, then dispatches
- * to the active provider with a single retry on PROVIDER_UNAVAILABLE.
+ * High-level entrypoint. Handles style preset resolution, quality-tier
+ * resolution, then dispatches to the active provider with a single retry
+ * on PROVIDER_UNAVAILABLE.
  *
- * opts.style (optional) — name of a style preset from config/image-styles.json.
- * When set, the preset's systemPrompt is composed with the user prompt,
- * reference images are loaded from disk and passed to the provider, and
- * the preset's preferredModel overrides opts.model unless the caller
- * explicitly supplied a model.
+ * Resolution order for the final model (first match wins):
+ *   1. opts.model                    — explicit model override
+ *   2. style.preferredModel          — set via `opts.style` preset
+ *   3. modelForQuality(opts.quality) — per-call quality tier override
+ *   4. modelForQuality(opts.projectQuality) — project-level default
+ *   5. DEFAULT_FAL_MODEL             — hardcoded fallback (flux-2-pro)
+ *
+ * opts.style — name of a style preset from config/image-styles.json.
+ * opts.quality — 'low' | 'medium' | 'high' per-call override.
+ * opts.projectQuality — 'low' | 'medium' | 'high' the project's setting.
  */
 async function generateImage(opts) {
   let finalOpts = { ...opts };
+  let resolvedQualityTier = null;
 
   if (opts.style) {
     let style;
@@ -441,6 +507,18 @@ async function generateImage(opts) {
     };
   }
 
+  // Quality tier resolution — only applies if we still don't have a model
+  // pinned from opts.model or style.preferredModel. The per-call override
+  // wins over the project-level setting.
+  if (!finalOpts.model) {
+    const tier = opts.quality || opts.projectQuality;
+    const qModel = modelForQuality(tier);
+    if (qModel) {
+      finalOpts.model = qModel;
+      resolvedQualityTier = String(tier).toLowerCase();
+    }
+  }
+
   const provider = getProvider();
   try {
     const result = await provider.generate(finalOpts);
@@ -448,6 +526,13 @@ async function generateImage(opts) {
     // which preset (if any) was applied.
     if (finalOpts._resolvedStyle && result.providerMeta) {
       result.providerMeta.style = finalOpts._resolvedStyle;
+    }
+    // Surface the resolved quality tier (if any) so agents can confirm
+    // which tier actually picked the model. Null when nothing set the
+    // model through a quality tier (either it was pinned directly, or
+    // the fallback DEFAULT_FAL_MODEL was used).
+    if (resolvedQualityTier && result.providerMeta) {
+      result.providerMeta.quality = resolvedQualityTier;
     }
     return result;
   } catch (err) {
@@ -470,10 +555,13 @@ module.exports = {
   resetProvider,
   generateImage,
   validatePrompt,
+  modelForQuality,
   MIN_PROMPT_LEN,
   MAX_PROMPT_LEN,
   // Re-export so routes don't need to require both modules
   styles: imageStyles,
   FAL_MODEL_PATHS,
   FAL_MODELS_WITH_REFERENCES,
+  QUALITY_TO_MODEL,
+  DEFAULT_FAL_MODEL,
 };

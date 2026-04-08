@@ -158,12 +158,21 @@ server.registerTool(
     description:
       'Create a new AgentBoard storyboard project with an optional list of boards. ' +
       'Returns the new project id and a shareable view URL. Use add_board or ' +
-      'generate_panel afterwards to fill in content.',
+      'generate_panel afterwards to fill in content. ' +
+      'Pass `quality` to set a project-level image quality tier: "low" (draft, ' +
+      'fastest/cheapest via z-image-turbo), "medium" (balanced, flux-2-pro — the ' +
+      'default when not set), or "high" (final-render via seedream-v5-lite). ' +
+      'Every subsequent generate_panel call on this project uses that tier unless ' +
+      'the caller passes its own `quality` or explicit `model`.',
     inputSchema: {
       title: z.string().optional().describe('Project title, shown in the viewer and PDF header'),
       aspectRatio: z.coerce.number().optional().describe('Aspect ratio width/height (default 1.7777 for 16:9)'),
       fps: z.coerce.number().optional().describe('Frames per second for time calculations'),
       defaultBoardTiming: z.coerce.number().optional().describe('Default duration per board in ms'),
+      quality: z.enum(['low', 'medium', 'high']).optional().describe(
+        'Project-level image quality tier. low=z-image-turbo (draft, cheapest), ' +
+        'medium=flux-2-pro (balanced, default when unset), high=seedream-v5-lite (final render).'
+      ),
       boards: z.array(z.object({
         dialogue: z.string().optional(),
         action: z.string().optional(),
@@ -371,10 +380,17 @@ server.registerTool(
         '"comic-panel" for inked comic style. Call list_image_styles to discover all options.'
       ),
       model: z.string().optional().describe(
-        'Explicit model override. Default is flux-2-pro (flagship quality). ' +
-        'Alternatives: flux-schnell (fastest + cheapest), flux-dev, flux-pro, flux-pro-v1.1, ' +
-        'flux-pro-ultra, flux-kontext-multi (reference-based), sdxl. When style is set, the ' +
-        'style\'s preferred model is used unless this is explicitly overridden.'
+        'Explicit model override. Wins over style and quality. ' +
+        'Known: z-image-turbo (cheapest draft), flux-schnell (fast+cheap), flux-dev, ' +
+        'flux-pro, flux-pro-v1.1, flux-pro-ultra, flux-kontext-multi (reference-based), ' +
+        'flux-2-pro (balanced default), seedream-v5-lite (top quality), sdxl. ' +
+        'When style is set, the style\'s preferred model is used unless this is explicitly overridden.'
+      ),
+      quality: z.enum(['low', 'medium', 'high']).optional().describe(
+        'Per-call quality tier override. Resolves to a concrete model: low→z-image-turbo ' +
+        '(draft), medium→flux-2-pro (balanced), high→seedream-v5-lite (final). ' +
+        'Use "low" for fast draft iteration and "high" for final renders. If unset, ' +
+        'falls back to the project-level quality that was set at create_storyboard time.'
       ),
       aspectRatio: z.coerce.number().optional(),
       seed: z.coerce.number().optional(),

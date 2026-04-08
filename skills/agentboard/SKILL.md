@@ -127,6 +127,45 @@ extra fingers, deformed hands, text, watermark".
 
 Pass an explicit `seed` if you want reproducibility across calls.
 
+## Quality tiers — `low` / `medium` / `high`
+
+Instead of picking model names directly, you can ask for a quality tier
+and let the server pick the right fal model. Three tiers:
+
+| Tier | Model | Speed | Cost | Use for |
+|---|---|---|---|---|
+| `low` | `z-image-turbo` | Fastest | Cheapest | Draft iteration, thumbnails, rapid "which composition works?" exploration |
+| `medium` | `flux-2-pro` | Fast | Mid | Default. Balanced quality for most panels |
+| `high` | `seedream-v5-lite` (ByteDance) | Slower | Highest | Final-render panels where quality > speed |
+
+**Project-level default:** set `quality` when you `create_storyboard` and
+every subsequent `generate_panel` call on that project will use it:
+
+```json
+{ "title": "The Lighthouse Keeper", "aspectRatio": 1.7777, "quality": "high", "boards": [...] }
+```
+
+**Per-call override:** pass `quality` to `generate_panel` and it wins
+over the project setting for that one call. Use this when iterating —
+set the project to `low` for drafts, then call with `quality: "high"`
+on the panels you keep.
+
+**Resolution priority (first match wins):**
+1. `generate_panel({ model: "..." })` — explicit pin, highest priority
+2. `generate_panel({ style: "..." })` — style preset's preferred model
+3. `generate_panel({ quality: "..." })` — per-call tier override
+4. `create_storyboard({ quality: "..." })` — project-level default
+5. Hardcoded fallback: `flux-2-pro`
+
+The response from `generate_panel` includes a `quality` field showing
+which tier actually picked the model (or `null` if resolution went
+through `model` or `style` instead). Asset metadata persists this too,
+so you can tell later which tier generated each panel.
+
+Style presets still win over quality tiers by design — `storyboard-sketch`
+always routes to `flux-kontext-multi` because it uses reference images,
+regardless of what quality tier the project is set to.
+
 ## Style presets — visual consistency across panels
 
 Pass `style: "<preset>"` to `generate_panel` (or include `style` in the
