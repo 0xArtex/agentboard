@@ -1,0 +1,81 @@
+# .dockerignore — keep the image minimal.
+#
+# Everything listed here is excluded from the Docker build context, so
+# none of it gets COPYd into the image. The goal is a tiny container
+# that contains ONLY the web-server + src/ (for the web UI at /).
+
+# ── Version control and editor state ──
+.git
+.gitignore
+.gitattributes
+.vscode
+.idea
+*.swp
+*.swo
+
+# ── Secrets and local environment ──
+.env
+*.env
+.env.*
+!.env.example
+web-server/.env
+
+# ── Local runtime state (volumes handle this in prod) ──
+node_modules
+web-server/node_modules
+web-server/data
+
+# ── The entire Electron/desktop Storyboarder stack we don't ship ──
+# These directories are the legacy desktop app. AgentBoard the server
+# doesn't need any of them at runtime.
+electron
+build
+test
+dist
+release
+app
+backups
+storyboards
+store
+
+# Webpack configs for the desktop bundles we don't serve.
+configs/xr
+configs/shot-generator
+configs/ar
+configs/shot-explorer
+configs/print-project
+
+# Shot generator / XR source trees — huge and unused.
+src/js/xr
+src/js/shot-generator
+src/js/shot-generator-new
+src/js/shot-explorer
+
+# Documentation and developer meta.
+CHANGELOG*
+CONTRIBUTING*
+DEVELOPERS*
+NOTES.local.md
+README*.md
+docs
+examples
+
+# The agent skill file is useful as a reference but doesn't belong in
+# the server image — it's loaded into the MCP client, not the server.
+skills
+
+# Build artifacts and tooling config at the repo root.
+Dockerfile
+.dockerignore
+.github
+.circleci
+.travis.yml
+Jenkinsfile
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# macOS / Windows crud
+.DS_Store
+Thumbs.db
