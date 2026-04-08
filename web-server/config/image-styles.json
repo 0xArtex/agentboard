@@ -5,7 +5,7 @@
   "storyboard-sketch": {
     "name": "Black & White Storyboard Sketch",
     "description": "Rough hand-drawn pre-production storyboard style. Loose marker lines, high contrast black on white, minimal detail, clear silhouettes. Matches the aesthetic of classic animated film pre-visualization art.",
-    "systemPrompt": "Black and white rough storyboard sketch. Hand-drawn marker lines, loose and gestural, high contrast. Minimal detail focused on action, composition, and silhouettes. Dramatic shadows as thick ink strokes. Classic pre-production animated film panel style. Monochrome only — no color.",
+    "systemPrompt": "Rough sketch for the scene in the reference images' style. Use the references for style only, not for characters or content.",
     "references": [
       "assets/reference-images/storyboard-sketch-1.png",
       "assets/reference-images/storyboard-sketch-2.png"
