@@ -40,13 +40,34 @@ Use this when you (or the runtime you're in) can already generate images and aud
    SAVE the id and every board's uid from the response.
 
 2. For each board, generate the image with YOUR OWN tool (fal, Sora, Veo,
-   Midjourney, Gemini, whatever you have). Then upload it:
+   Midjourney, Gemini, whatever you have). Then upload it.
 
-   POST /api/agent/draw
+   REST: POST /api/agent/draw with inline base64:
    { "projectId": "...", "boardUid": "...",
      "layer": "fill", "imageBase64": "<base64-png>",
      "mime": "image/png" }
-   → { hash, size, kind }
+   → { hash, size, kind, mime }
+
+   MCP: use upload_image with ONE of three input modes — pick based on
+   where the bytes currently live:
+     - imagePath: "/tmp/panel.png"         ← local file, ZERO agent context cost (preferred)
+     - imageUrl:  "https://fal.media/..."  ← URL the MCP server fetches (great for fal CDN links)
+     - imageBase64: "<base64>"             ← inline, only for tiny images (burns agent context)
+
+   Context cost matters: a 500 KB image is ~680 KB of base64. If you
+   pass that as inline imageBase64 from an LLM tool call, the bytes go
+   into the agent's context window. Use imagePath or imageUrl instead —
+   the MCP server reads/fetches the bytes and they never touch your
+   context at all. Same for upload_audio with audioPath/audioUrl.
+
+   Server-side upload validation:
+     - Image cap: 10 MB, audio cap: 20 MB (413 UPLOAD_TOO_LARGE)
+     - Magic-byte mime sniffing: you can't spoof the Content-Type.
+       If you declare image/png but pass JPEG bytes, the server stores
+       it as image/jpeg (the real type wins).
+     - Accepted image mimes: image/png, image/jpeg, image/gif, image/webp
+     - Accepted audio mimes: audio/mpeg, audio/wav, audio/ogg
+     - Other formats → 400 BAD_MIME
 
 3. (optional) Annotate on top of the uploaded image:
    POST /api/agent/draw-shapes
@@ -207,6 +228,8 @@ All errors return `{ error: { code, message } }`. The codes that matter:
 |---|---|---|
 | `BAD_REQUEST` | 400 | Fix the request body shape |
 | `BAD_BASE64` | 400 | Re-encode the image/audio bytes |
+| `BAD_MIME` | 400 | Uploaded bytes aren't a recognized format (magic-byte check). Re-export the image/audio in a supported format |
+| `UPLOAD_TOO_LARGE` | 413 | Image >10 MB or audio >20 MB. Resize/compress and retry |
 | `BAD_DRAW` | 400 | Drawing command validation failed (bad coords, unknown brush/shape, oversized array) |
 | `NO_BOARD` | 404 | The `boardUid` doesn't exist — verify via `GET /api/agent/project/:id` |
 | `NOT_FOUND` | 404 | The `projectId` doesn't exist |

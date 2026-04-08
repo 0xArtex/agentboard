@@ -59,6 +59,8 @@ import { z } from 'zod';
 import { config as dotenvConfig } from 'dotenv';
 import { fileURLToPath } from 'url';
 import * as path from 'path';
+import * as fs from 'fs';
+import * as net from 'net';
 
 // Load .env alongside the MCP server file so running the server directly
 // (without going through the web-server) still picks up AGENTBOARD_URL,
@@ -122,6 +124,126 @@ function errorText(err) {
     isError: true,
     content: [{ type: 'text', text: JSON.stringify(base, null, 2) }],
   };
+}
+
+// ── bytes loader (context-free upload) ────────────────────────────────
+//
+// The core problem: MCP tool arguments travel through the agent's context
+// window. If an agent has to pass 2 MB of base64 inline, it chews through
+// token budget in a single call. This helper lets tools accept three
+// input modes so the bytes NEVER touch the agent context unless they're
+// tiny:
+//
+//   imageBase64 / audioBase64 — inline, small only (under ~10 KB)
+//   imagePath   / audioPath   — file path the MCP subprocess reads
+//   imageUrl    / audioUrl    — URL the MCP subprocess fetches
+//
+// The MCP server runs on the same machine as the agent (it's spawned as
+// a subprocess), so path-based reads don't grant any capability the
+// agent didn't already have — they just keep bytes out of the LLM's
+// context window.
+//
+// URL fetching has basic SSRF guards: http/https only, private-IP block,
+// hard size + time limits. This is best-effort — the primary use case is
+// agents fetching their own fal CDN URLs, not internal network probes.
+
+const MAX_FETCH_BYTES = 25 * 1024 * 1024;    // 25 MB hard cap on remote/local reads
+const FETCH_TIMEOUT_MS = 30_000;
+
+function isPrivateHost(hostname) {
+  if (!hostname) return true;
+  const h = hostname.toLowerCase();
+  if (h === 'localhost' || h === '0.0.0.0') return true;
+  if (h.endsWith('.localhost') || h.endsWith('.internal') || h.endsWith('.local')) return true;
+  // Numeric IPs — check against RFC1918 / loopback / link-local ranges.
+  if (net.isIP(h)) {
+    const parts = h.split('.').map(Number);
+    if (parts[0] === 10) return true;                           // 10/8
+    if (parts[0] === 127) return true;                          // 127/8 loopback
+    if (parts[0] === 169 && parts[1] === 254) return true;      // link-local
+    if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true; // 172.16/12
+    if (parts[0] === 192 && parts[1] === 168) return true;      // 192.168/16
+    if (h.startsWith('::') || h.startsWith('fc') || h.startsWith('fd') || h === '::1') return true;
+  }
+  return false;
+}
+
+async function readLocalFile(filePath) {
+  const abs = path.isAbsolute(filePath) ? filePath : path.resolve(process.cwd(), filePath);
+  const stat = await fs.promises.stat(abs).catch(() => null);
+  if (!stat || !stat.isFile()) {
+    throw new Error(`path not readable: ${abs}`);
+  }
+  if (stat.size > MAX_FETCH_BYTES) {
+    throw new Error(`file too large: ${stat.size} bytes (max ${MAX_FETCH_BYTES})`);
+  }
+  return await fs.promises.readFile(abs);
+}
+
+async function fetchUrlBytes(urlStr) {
+  let u;
+  try { u = new URL(urlStr); }
+  catch { throw new Error(`invalid URL: ${urlStr}`); }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+    throw new Error(`only http/https URLs are allowed, got ${u.protocol}`);
+  }
+  if (isPrivateHost(u.hostname)) {
+    throw new Error(`refusing to fetch from private/loopback host: ${u.hostname}`);
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const res = await fetch(urlStr, { signal: controller.signal });
+    if (!res.ok) throw new Error(`fetch ${urlStr} → ${res.status}`);
+    const contentLength = Number(res.headers.get('content-length') || 0);
+    if (contentLength && contentLength > MAX_FETCH_BYTES) {
+      throw new Error(`remote file too large: ${contentLength} bytes (max ${MAX_FETCH_BYTES})`);
+    }
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length > MAX_FETCH_BYTES) {
+      throw new Error(`remote file too large: ${buf.length} bytes (max ${MAX_FETCH_BYTES})`);
+    }
+    return { bytes: buf, contentType: res.headers.get('content-type') || null };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Normalize whatever input shape the agent passed into { base64, mime }.
+ * Accepts exactly one of base64 / path / url per call.
+ *
+ *   loadBytesForTool({ base64, path, url, defaultMime })
+ *     → { base64: '<base64>', mime: 'image/png' }
+ */
+async function loadBytesForTool({ base64, path: filePath, url, defaultMime }) {
+  const provided = [base64, filePath, url].filter(v => v != null && v !== '').length;
+  if (provided === 0) {
+    throw new Error('must provide exactly one of base64 / path / url');
+  }
+  if (provided > 1) {
+    throw new Error('provide only one of base64 / path / url — not multiple');
+  }
+
+  if (base64) {
+    // Strip data URL prefix if present. Caller-supplied mime wins.
+    const stripped = String(base64).replace(/^data:([^;]+);base64,/, (_m, m) => {
+      if (!defaultMime) defaultMime = m;
+      return '';
+    });
+    return { base64: stripped, mime: defaultMime || null };
+  }
+
+  if (filePath) {
+    const bytes = await readLocalFile(filePath);
+    return { base64: bytes.toString('base64'), mime: defaultMime || null };
+  }
+
+  if (url) {
+    const { bytes, contentType } = await fetchUrlBytes(url);
+    return { base64: bytes.toString('base64'), mime: contentType || defaultMime || null };
+  }
 }
 
 // Wrap every tool impl with a standard try/catch so the MCP client sees
@@ -313,22 +435,38 @@ server.registerTool(
   {
     title: 'Upload an image to a board layer',
     description:
-      'PREFERRED image path. Upload a base64-encoded PNG/JPG to a specific layer ' +
-      'of a board. If your runtime has built-in image generation (fal, Sora, Veo, ' +
-      'Midjourney, Gemini, etc.), generate the image with your own tool and upload ' +
-      'it here — cheaper, faster, and you control the model. Only fall back to ' +
-      'generate_panel if you have NO image generation of your own. Layers: ' +
-      "'fill' (most common), 'reference', 'ink', 'notes', 'pencil', 'tone'.",
+      'PREFERRED image path. Attach an image to a specific layer of a board. ' +
+      'If your runtime has built-in image generation (fal, Sora, Veo, Midjourney, ' +
+      'Gemini, etc.), generate the image with your own tool and upload it here — ' +
+      'cheaper, faster, and you control the model. Only fall back to generate_panel ' +
+      'if you have NO image generation of your own. Pass EXACTLY ONE of imagePath ' +
+      '(local file — BEST for agent workflows, zero context cost), imageUrl (remote ' +
+      'URL the server fetches — great for fal CDN links), or imageBase64 (inline ' +
+      'bytes — use only for tiny images, bloats agent context). ' +
+      "Layers: 'fill' (most common), 'reference', 'ink', 'notes', 'pencil', 'tone'.",
     inputSchema: {
       projectId: z.string(),
       boardUid: z.string(),
       layer: z.string().describe('Layer name (fill, reference, ink, notes, ...)'),
-      imageBase64: z.string().describe('Base64-encoded image bytes (data: prefix allowed)'),
-      mime: z.string().optional().describe('image/png (default) or image/jpeg'),
+      imagePath: z.string().optional().describe('Local file path the MCP subprocess reads. Preferred for any image over ~10 KB — zero agent context cost.'),
+      imageUrl: z.string().optional().describe('http/https URL the MCP subprocess fetches (e.g. a fal CDN link). http-only, blocks private IPs, 25 MB cap.'),
+      imageBase64: z.string().optional().describe('Inline base64 bytes. Use only for small images — every byte burns agent context.'),
+      mime: z.string().optional().describe('image/png (default) or image/jpeg. Inferred from URL/file extension when possible.'),
     },
   },
   handle(async (args) => {
-    const result = await apiRequest('POST', '/api/agent/draw', args);
+    const { projectId, boardUid, layer, mime } = args;
+    const { base64, mime: detectedMime } = await loadBytesForTool({
+      base64: args.imageBase64,
+      path: args.imagePath,
+      url: args.imageUrl,
+      defaultMime: mime || null,
+    });
+    const result = await apiRequest('POST', '/api/agent/draw', {
+      projectId, boardUid, layer,
+      imageBase64: base64,
+      mime: mime || detectedMime || 'image/png',
+    });
     return okText(result);
   })
 );
@@ -342,21 +480,34 @@ server.registerTool(
       'PREFERRED audio path. Attach an audio file to a board. If your runtime has ' +
       'built-in TTS or audio generation, produce the audio with your own tool and ' +
       'upload it here. Only fall back to generate_speech/generate_sound_effect/' +
-      'generate_music if you have NO audio generation of your own. Use kind to ' +
-      'distinguish narration, sfx, music, ambient, or reference. Accepts ' +
-      'base64-encoded mp3/wav/ogg bytes.',
+      'generate_music if you have NO audio generation of your own. Pass EXACTLY ONE ' +
+      'of audioPath (local file — BEST, zero context cost), audioUrl (remote URL the ' +
+      'server fetches), or audioBase64 (inline bytes — use only for very short clips).',
     inputSchema: {
       projectId: z.string(),
       boardUid: z.string(),
       kind: z.string().optional().describe('narration | sfx | music | ambient | reference (default narration)'),
-      audioBase64: z.string(),
+      audioPath: z.string().optional().describe('Local file path the MCP subprocess reads. Preferred for any audio — zero agent context cost.'),
+      audioUrl: z.string().optional().describe('http/https URL the MCP subprocess fetches. http-only, blocks private IPs, 25 MB cap.'),
+      audioBase64: z.string().optional().describe('Inline base64 bytes. Use only for very short clips — burns agent context.'),
       mime: z.string().optional().describe('audio/mpeg (default), audio/wav, audio/ogg'),
       duration: z.coerce.number().optional().describe('Duration in ms, optional metadata'),
       voice: z.string().optional(),
     },
   },
   handle(async (args) => {
-    const result = await apiRequest('POST', '/api/agent/upload-audio', args);
+    const { projectId, boardUid, kind, mime, duration, voice } = args;
+    const { base64, mime: detectedMime } = await loadBytesForTool({
+      base64: args.audioBase64,
+      path: args.audioPath,
+      url: args.audioUrl,
+      defaultMime: mime || null,
+    });
+    const result = await apiRequest('POST', '/api/agent/upload-audio', {
+      projectId, boardUid, kind, duration, voice,
+      audioBase64: base64,
+      mime: mime || detectedMime || 'audio/mpeg',
+    });
     return okText(result);
   })
 );

@@ -74,6 +74,79 @@ function decodeBase64(input, fieldName) {
   }
 }
 
+// ── upload hardening: size caps + magic-byte mime sniff ───────────────
+//
+// Per-upload byte caps. These are separate from the 50 MB express.json
+// body limit — the body limit protects the parser, these protect the
+// actual blob store. Prevents loop-uploads from filling disk/R2.
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;   // 10 MB
+const MAX_AUDIO_BYTES = 20 * 1024 * 1024;   // 20 MB
+
+// Check the first few bytes of a buffer against known image/audio
+// signatures. Returns the detected mime type, or null if unrecognized.
+// Used to verify the client-supplied mime isn't lying.
+function sniffMime(buf) {
+  if (!buf || buf.length < 4) return null;
+  // PNG: 89 50 4E 47 0D 0A 1A 0A
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47) return 'image/png';
+  // JPEG: FF D8 FF
+  if (buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF) return 'image/jpeg';
+  // GIF: 47 49 46 38 ("GIF8")
+  if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x38) return 'image/gif';
+  // WebP: RIFF....WEBP
+  if (buf.length >= 12 && buf.slice(0, 4).toString('ascii') === 'RIFF' && buf.slice(8, 12).toString('ascii') === 'WEBP') return 'image/webp';
+  // MP3: ID3 header (49 44 33) or frame sync FF Fx
+  if (buf[0] === 0x49 && buf[1] === 0x44 && buf[2] === 0x33) return 'audio/mpeg';
+  if (buf[0] === 0xFF && (buf[1] & 0xE0) === 0xE0) return 'audio/mpeg';
+  // WAV: RIFF....WAVE
+  if (buf.length >= 12 && buf.slice(0, 4).toString('ascii') === 'RIFF' && buf.slice(8, 12).toString('ascii') === 'WAVE') return 'audio/wav';
+  // OGG: OggS
+  if (buf[0] === 0x4F && buf[1] === 0x67 && buf[2] === 0x67 && buf[3] === 0x53) return 'audio/ogg';
+  // PDF: %PDF
+  if (buf[0] === 0x25 && buf[1] === 0x50 && buf[2] === 0x44 && buf[3] === 0x46) return 'application/pdf';
+  return null;
+}
+
+/**
+ * Validate uploaded bytes against a size cap and an allowed-mime list.
+ * Throws a structured error on any violation. Returns the resolved mime
+ * (server-trusted, from magic bytes) so the caller doesn't have to trust
+ * the client's declared mime.
+ *
+ *   enforceUploadLimits(bytes, {
+ *     maxBytes: MAX_IMAGE_BYTES,
+ *     kind: 'image',
+ *     allowedMimes: ['image/png', 'image/jpeg'],
+ *     declaredMime: body.mime,
+ *   })
+ */
+function enforceUploadLimits(bytes, { maxBytes, kind, allowedMimes, declaredMime }) {
+  if (bytes.length > maxBytes) {
+    const err = new Error(
+      `${kind} is ${bytes.length} bytes, max allowed is ${maxBytes} (${Math.round(maxBytes / 1024 / 1024)} MB)`
+    );
+    err.code = 'UPLOAD_TOO_LARGE';
+    throw err;
+  }
+  const detected = sniffMime(bytes);
+  if (!detected) {
+    const err = new Error(`${kind} bytes don't match any known ${kind} format (PNG/JPEG/GIF/WebP or MP3/WAV/OGG)`);
+    err.code = 'BAD_MIME';
+    throw err;
+  }
+  if (allowedMimes && !allowedMimes.includes(detected)) {
+    const err = new Error(
+      `${kind} format ${detected} not allowed. Allowed: ${allowedMimes.join(', ')}`
+    );
+    err.code = 'BAD_MIME';
+    throw err;
+  }
+  // If the client declared a mime, warn when it disagrees with reality
+  // but trust the magic bytes. Silent mismatch is fine — spoofed mime is
+  // exactly what this check catches.
+  return detected;
+}
+
 function broadcast(req, event, payload) {
   const handler = req.app.locals.socketHandler;
   if (!handler) return;
@@ -461,15 +534,28 @@ router.post('/draw', requireProjectAccess('write'), asyncHandler(async (req, res
   } catch (e) {
     return res.status(400).json({ error: { code: e.code, message: e.message } });
   }
-  const mime = body.mime || 'image/png';
+  // Size cap + magic-byte mime sniff. The mime we actually store is the
+  // sniffed one, not whatever the client claimed — prevents spoofing.
+  let trustedMime;
+  try {
+    trustedMime = enforceUploadLimits(bytes, {
+      maxBytes: MAX_IMAGE_BYTES,
+      kind: 'image',
+      allowedMimes: ['image/png', 'image/jpeg', 'image/gif', 'image/webp'],
+      declaredMime: body.mime,
+    });
+  } catch (e) {
+    const status = e.code === 'UPLOAD_TOO_LARGE' ? 413 : 400;
+    return res.status(status).json({ error: { code: e.code, message: e.message } });
+  }
   try {
     const result = await store.storeBoardAsset(
-      req.projectId, boardUid, 'layer:' + layer, bytes, mime
+      req.projectId, boardUid, 'layer:' + layer, bytes, trustedMime
     );
     broadcast(req, 'asset:update', {
       projectId: req.projectId, boardUid, kind: result.kind, hash: result.hash,
     });
-    res.status(201).json(result);
+    res.status(201).json({ ...result, mime: trustedMime });
   } catch (err) {
     const status = err.code === 'NO_BOARD' ? 404 : (err.code === 'WRONG_PROJECT' ? 403 : 400);
     return res.status(status).json({ error: { code: err.code, message: err.message } });
@@ -698,21 +784,33 @@ router.post('/upload-audio', requireProjectAccess('write'), asyncHandler(async (
   } catch (e) {
     return res.status(400).json({ error: { code: e.code, message: e.message } });
   }
+  // Size cap + magic-byte mime sniff. Trust the sniffed mime, not the client's.
+  let trustedMime;
+  try {
+    trustedMime = enforceUploadLimits(bytes, {
+      maxBytes: MAX_AUDIO_BYTES,
+      kind: 'audio',
+      allowedMimes: ['audio/mpeg', 'audio/wav', 'audio/ogg'],
+      declaredMime: body.mime,
+    });
+  } catch (e) {
+    const status = e.code === 'UPLOAD_TOO_LARGE' ? 413 : 400;
+    return res.status(status).json({ error: { code: e.code, message: e.message } });
+  }
   const subkind = (body.kind || 'narration').replace(/[^a-z]/g, '');
-  const mime = body.mime || 'audio/mpeg';
   const meta = {};
   if (body.duration != null) meta.duration = body.duration;
   if (body.voice) meta.voice = body.voice;
   if (body.source) meta.source = body.source;
   try {
     const result = await store.storeBoardAsset(
-      req.projectId, boardUid, 'audio:' + subkind, bytes, mime,
+      req.projectId, boardUid, 'audio:' + subkind, bytes, trustedMime,
       Object.keys(meta).length ? meta : null
     );
     broadcast(req, 'asset:update', {
       projectId: req.projectId, boardUid, kind: result.kind, hash: result.hash,
     });
-    res.status(201).json(result);
+    res.status(201).json({ ...result, mime: trustedMime });
   } catch (err) {
     const status = err.code === 'NO_BOARD' ? 404 : (err.code === 'WRONG_PROJECT' ? 403 : 400);
     return res.status(status).json({ error: { code: err.code, message: err.message } });
