@@ -172,7 +172,12 @@ const FAL_MODEL_PATHS = {
   'sdxl':            'fal-ai/fast-sdxl',
   'stable-diffusion-3.5': 'fal-ai/stable-diffusion-v35-large',
 };
-const DEFAULT_FAL_MODEL = 'flux-schnell';
+// flux-2-pro is the flagship text-to-image model: highest quality,
+// prompt adherence, and typography. It's the right default for a
+// storyboard tool where the human will actually look at every frame.
+// Callers who want cheaper/faster can still pass model:"flux-schnell"
+// explicitly. Style presets override this via `preferredModel`.
+const DEFAULT_FAL_MODEL = 'flux-2-pro';
 
 // Models that accept reference images via image_url / image_urls in the
 // request body. When the caller passes references but picks a model NOT

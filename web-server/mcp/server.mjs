@@ -371,9 +371,10 @@ server.registerTool(
         '"comic-panel" for inked comic style. Call list_image_styles to discover all options.'
       ),
       model: z.string().optional().describe(
-        'Explicit model override. flux-schnell (fastest + cheapest), flux-dev, flux-pro, ' +
-        'flux-pro-v1.1, flux-pro-ultra, flux-kontext-multi (reference-based), flux-2-pro, ' +
-        'sdxl. When style is set, the style\'s preferred model is used unless this is set.'
+        'Explicit model override. Default is flux-2-pro (flagship quality). ' +
+        'Alternatives: flux-schnell (fastest + cheapest), flux-dev, flux-pro, flux-pro-v1.1, ' +
+        'flux-pro-ultra, flux-kontext-multi (reference-based), sdxl. When style is set, the ' +
+        'style\'s preferred model is used unless this is explicitly overridden.'
       ),
       aspectRatio: z.coerce.number().optional(),
       seed: z.coerce.number().optional(),

@@ -709,7 +709,11 @@ router.post('/upload-audio', requireProjectAccess('write'), asyncHandler(async (
 //   boardUid:      string   (required)
 //   layer:         string   (optional, default 'fill')
 //   prompt:        string   (required, 2-2000 chars)
-//   model?:        string   (default 'flux-schnell'; provider-specific)
+//   model?:        string   (default 'flux-2-pro'; provider-specific.
+//                             Known: flux-schnell, flux-dev, flux-pro,
+//                             flux-pro-v1.1, flux-pro-ultra, flux-kontext,
+//                             flux-kontext-max, flux-kontext-multi,
+//                             flux-2-pro, sdxl, stable-diffusion-3.5)
 //   style?:        string   (optional — named preset from config/image-styles.json.
 //                             When set, prepends the preset's systemPrompt, loads
 //                             its reference images, and auto-selects the preferred
