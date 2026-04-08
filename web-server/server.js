@@ -184,13 +184,102 @@ app.use('/view', agentAuthMiddleware, viewRouter);
 // served via /api/projects/:id and cached client-side, so this fallback is
 // rarely hit but kept for completeness).
 
-// ── Root route: serve the web app HTML ──
-app.get('/', (req, res) => {
+// ── Root route: per-visitor project ──
+//
+// Each browser visitor gets their own project instead of sharing one
+// global "current" project across everyone. Flow:
+//
+//   GET /?project=<uuid>           → serve the web UI directly; the
+//                                    web-bootstrap reads the query
+//                                    param and loads that project.
+//
+//   GET / (with a valid cookie)    → redirect to /?project=<cookie_id>
+//                                    so the returning visitor lands
+//                                    on the same project they edited
+//                                    last time.
+//
+//   GET / (no cookie, or stale)    → create a new empty project, set
+//                                    the cookie, redirect to
+//                                    /?project=<new_id>. Rate limited
+//                                    per-IP so bots/crawlers can't
+//                                    spam-create projects.
+//
+// The cookie is a long-lived (1 year), HttpOnly, SameSite=Lax cookie
+// that stores nothing but the projectId. No auth, no session, no PII.
+// Users who want a fresh project can clear the cookie or edit the URL
+// to drop the ?project= param and refresh.
+const { frequencyLimiter } = require('./middleware/rate-limit');
+const LAST_PROJECT_COOKIE = 'agentboard_project';
+const COOKIE_MAX_AGE_SEC = 60 * 60 * 24 * 365; // 1 year
+
+function parseCookies(req) {
+  const header = req.headers.cookie;
+  if (!header) return {};
+  const out = {};
+  for (const chunk of header.split(';')) {
+    const eq = chunk.indexOf('=');
+    if (eq < 0) continue;
+    const k = chunk.slice(0, eq).trim();
+    const v = chunk.slice(eq + 1).trim();
+    if (k) out[k] = decodeURIComponent(v);
+  }
+  return out;
+}
+
+function serveWebAppHtml(res) {
   const htmlPath = path.join(SRC_DIR, 'web-app.html');
   if (fs.existsSync(htmlPath)) {
     res.sendFile(htmlPath);
   } else {
     res.status(404).send('web-app.html not found. Run the webpack build first.');
+  }
+}
+
+// Rate-limit the auto-create-project path to 20/hour per IP. The
+// existing agent rate limiters are keyed on req.agent which doesn't
+// exist at this layer (the browser root route is outside agent-auth),
+// so we use the pure IP-based limiter here. Hits against /?project=<id>
+// bypass this entirely since they don't create a new project.
+const rootCreateLimiter = frequencyLimiter({ windowMs: 60 * 60 * 1000, max: 20 });
+
+app.get('/', async (req, res, next) => {
+  try {
+    // Direct project link — just serve the HTML, the web-bootstrap
+    // handles loading the project from the ?project= query param.
+    if (req.query.project) {
+      return serveWebAppHtml(res);
+    }
+
+    // Returning visitor — check the cookie and verify the project
+    // still exists before redirecting.
+    const cookies = parseCookies(req);
+    const cookieProjectId = cookies[LAST_PROJECT_COOKIE];
+    if (cookieProjectId) {
+      const existing = await projectStore.getProject(cookieProjectId);
+      if (existing) {
+        return res.redirect(302, `/?project=${encodeURIComponent(cookieProjectId)}`);
+      }
+      // Cookie points at a project that no longer exists (deleted,
+      // different deploy, etc.) — fall through to create a fresh one.
+    }
+
+    // First-time visitor (or stale cookie) — rate-limit this branch
+    // only. The limiter calls next() on success; we then create a
+    // new project and redirect. On 429, the limiter already sent the
+    // response so we just return.
+    return rootCreateLimiter(req, res, async () => {
+      try {
+        const { id } = await projectStore.createProject({});
+        res.setHeader('Set-Cookie',
+          `${LAST_PROJECT_COOKIE}=${encodeURIComponent(id)}; Path=/; Max-Age=${COOKIE_MAX_AGE_SEC}; HttpOnly; SameSite=Lax`
+        );
+        return res.redirect(302, `/?project=${encodeURIComponent(id)}`);
+      } catch (err) {
+        return next(err);
+      }
+    });
+  } catch (err) {
+    return next(err);
   }
 });
 
