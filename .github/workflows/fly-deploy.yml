@@ -1,0 +1,46 @@
+# Auto-deploy AgentBoard to Fly.io on every push to master.
+# Docs: https://fly.io/docs/app-guides/continuous-deployment-with-github-actions/
+#
+# Setup (one-time):
+#   1. Create a non-expiring deploy token on your laptop:
+#        fly tokens create deploy -x 999999h
+#   2. Copy the token (starts with "FlyV1 fm2_...").
+#   3. Add it to the GitHub repo secrets:
+#        Settings -> Secrets and variables -> Actions -> New repository secret
+#        Name:  FLY_API_TOKEN
+#        Value: <the token from step 2>
+#
+# After that, every `git push origin master` triggers a deploy. Live
+# build logs are visible in the repo's Actions tab.
+#
+# The build runs on Fly's remote builders (not GitHub's runners) via
+# --remote-only, so this barely touches GitHub Actions minutes and
+# benefits from Fly's build cache.
+#
+# If the new image fails the /api/health check, Fly keeps the old
+# machine alive and marks the deploy as failed — a broken commit
+# doesn't take the live site down, but the Actions run will show red.
+
+name: Fly Deploy
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  deploy:
+    name: Deploy app
+    runs-on: ubuntu-latest
+    concurrency: deploy-group    # only one deploy at a time; in-flight pushes queue
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Deploy to Fly.io
+        run: flyctl deploy --remote-only
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

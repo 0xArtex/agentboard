@@ -1,75 +1,41 @@
-# Fly.io config for AgentBoard
-# ─────────────────────────────
-# Docs: https://fly.io/docs/reference/configuration/
+# fly.toml app configuration file generated for agentboard on 2026-04-08T14:46:17+04:00
 #
-# Before deploying:
-#   1. Edit `app` below to a unique name (Fly.io requires globally unique)
-#   2. (Optional) Change `primary_region` to something closer to your users
-#   3. Run: fly launch --no-deploy     # creates the app
-#   4. Run: fly volumes create agentboard_data --size 3 --region fra
-#   5. Run: fly secrets set FAL_KEY=<your new fal key>
-#   6. Run: fly secrets set ELEVENLABS_KEY=<your new elevenlabs key>
-#   7. Run: fly deploy
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
-# See DEPLOY.md for the full runbook including verification steps.
 
-app = "agentboard"
-primary_region = "fra"   # Frankfurt — good latency for EU + MENA users
+app = 'agentboard'
+primary_region = 'fra'
 
 [build]
-  # Uses the Dockerfile at the repo root. No explicit builder config needed.
 
-# ── Environment variables (non-secret) ──
-# Secrets (FAL_KEY, ELEVENLABS_KEY, etc.) go via `fly secrets set`,
-# NOT here — anything in this block is visible in the Fly dashboard.
 [env]
-  NODE_ENV = "production"
-  PORT = "3456"
+  AGENT_AUTH_ENABLED = '0'
+  NODE_ENV = 'production'
+  PORT = '3456'
+  PUBLIC_BASE_URL = 'https://agentboard.fly.dev'
+  X402_ENABLED = '0'
 
-  # Rate limiting is ON by default (per-IP + per-agent-token in the
-  # existing middleware). No auth enforcement — the user's decision
-  # is "agents are agents, rate limits are the defense."
-  AGENT_AUTH_ENABLED = "0"
+[[mounts]]
+  source = 'agentboard_data'
+  destination = '/app/web-server/data'
 
-  # x402 payments off for initial deploy. Flip to "1" once real chain
-  # verification is wired up (see NOTES.local.md Phase 3 section).
-  X402_ENABLED = "0"
-
-  # Used by share URL generation + x402 response body. MUST match the
-  # externally-visible URL. Update this if you bind a custom domain.
-  PUBLIC_BASE_URL = "https://agentboard.fly.dev"
-
-# ── HTTP service ──
-# Fly terminates TLS at the edge and forwards to the container's
-# internal port. Force HTTPS in production.
 [http_service]
   internal_port = 3456
   force_https = true
-  auto_stop_machines = "stop"
+  auto_stop_machines = 'stop'
   auto_start_machines = true
   min_machines_running = 0
-  processes = ["app"]
+  processes = ['app']
 
   [[http_service.checks]]
-    interval = "30s"
-    timeout = "5s"
-    grace_period = "20s"
-    method = "GET"
-    path = "/api/health"
+    interval = '30s'
+    timeout = '5s'
+    grace_period = '20s'
+    method = 'GET'
+    path = '/api/health'
 
-# ── Persistent volume for SQLite + blob store ──
-# Without this, every container restart wipes all projects.
-# The mount target MUST match where project-store.js expects data:
-# web-server/data/ (relative to the app root at /app).
-[[mounts]]
-  source = "agentboard_data"
-  destination = "/app/web-server/data"
-
-# ── Machine sizing ──
-# 512 MB RAM is plenty for the Node process plus a working set of
-# base64 upload buffers. If you see OOMs under real load (e.g. large
-# batch uploads of 256 MB images), bump this to 1 GB.
 [[vm]]
-  memory = "512mb"
-  cpu_kind = "shared"
+  memory = '512mb'
+  cpu_kind = 'shared'
   cpus = 1
+  memory_mb = 512

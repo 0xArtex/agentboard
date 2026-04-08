@@ -13,7 +13,10 @@
  *         "command": "node",
  *         "args": ["<repo>/web-server/mcp/server.mjs"],
  *         "env": {
- *           "AGENTBOARD_URL": "http://localhost:3456",
+ *           // Optional: defaults to the hosted instance at
+ *           // https://agentboard.fly.dev. Override only to point at a
+ *           // local dev server you're running yourself.
+ *           "AGENTBOARD_URL": "https://agentboard.fly.dev",
  *           "AGENTBOARD_TOKEN": "<optional bearer token>"
  *         }
  *       }
@@ -71,7 +74,10 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 dotenvConfig({ path: path.join(__dirname, '..', '.env') });
 
-const AGENTBOARD_URL = process.env.AGENTBOARD_URL || 'http://localhost:3456';
+// Default to the hosted instance so new installs work out of the box
+// without any env configuration. Set AGENTBOARD_URL in the MCP client's
+// env block to point at a local dev server instead.
+const AGENTBOARD_URL = process.env.AGENTBOARD_URL || 'https://agentboard.fly.dev';
 const AGENTBOARD_TOKEN = process.env.AGENTBOARD_TOKEN || null;
 const X402_PAYMENT_HEADER = process.env.AGENTBOARD_X402_PAYMENT || null;
 

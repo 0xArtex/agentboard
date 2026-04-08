@@ -1,6 +1,6 @@
 ---
 name: agentboard
-description: Store, annotate, and share multi-panel storyboards via a REST API. Invoke when the user wants to build a storyboard, pre-visualization, shot-by-shot breakdown, animatic, illustrated narrative, or any ordered sequence of visual panels with text metadata. Agents with their own image/video/TTS generation should UPLOAD the bytes they produce to AgentBoard's board layers — AgentBoard stores them, lets you draw/annotate on top, composites layers, exports PDFs, and returns shareable view URLs. Works over plain HTTP at AGENTBOARD_URL (default http://localhost:3456), or via MCP tools if your runtime supports them. Generation tools (fal.ai, ElevenLabs) are available as a FALLBACK for agents without built-in generation.
+description: Store, annotate, and share multi-panel storyboards via a REST API. Invoke when the user wants to build a storyboard, pre-visualization, shot-by-shot breakdown, animatic, illustrated narrative, or any ordered sequence of visual panels with text metadata. Agents with their own image/video/TTS generation should UPLOAD the bytes they produce to AgentBoard's board layers — AgentBoard stores them, lets you draw/annotate on top, composites layers, exports PDFs, and returns shareable view URLs. The hosted instance is at https://agentboard.fly.dev (override with AGENTBOARD_URL env var to point at a local dev server). Also available via MCP tools if your runtime supports them. Generation tools (fal.ai, ElevenLabs) are available as a FALLBACK for agents without built-in generation.
 ---
 
 # AgentBoard — agent quick reference
@@ -9,9 +9,13 @@ AgentBoard is a **storyboard canvas for agents**. Your job: put images, audio, a
 
 ## Transport — pick one
 
-**REST (works everywhere).** All routes live under `AGENTBOARD_URL` (default `http://localhost:3456`). Every example in this file uses REST so you can copy-paste without an MCP runtime. POST bodies are JSON.
+**REST (works everywhere).** All routes live under `AGENTBOARD_URL`:
+- **Hosted (default):** `https://agentboard.fly.dev` — publicly reachable, TLS, no setup required. Use this from any agent, anywhere.
+- **Local dev:** set `AGENTBOARD_URL=http://localhost:3456` in your env if you're running the server yourself.
 
-**MCP (Claude Code / Desktop / Cursor).** If you see tools named `mcp__agentboard__*` in your tool list, you can call them directly — same argument shapes as the REST bodies below, just drop `projectId`/`boardUid` into the tool args. If you don't see them, use REST.
+Every example in this file uses `https://agentboard.fly.dev` so you can copy-paste without an MCP runtime. POST bodies are JSON.
+
+**MCP (Claude Code / Desktop / Cursor).** If you see tools named `mcp__agentboard__*` in your tool list, you can call them directly — same argument shapes as the REST bodies below, just drop `projectId`/`boardUid` into the tool args. The MCP server defaults to the hosted URL; override with `AGENTBOARD_URL` in its env block if you're pointing at a local dev server. If you don't see the tools, use REST.
 
 Everything else in this doc describes the REST surface because the request/response shapes are identical.
 
