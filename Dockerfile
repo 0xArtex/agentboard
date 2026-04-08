@@ -41,7 +41,11 @@ ENV ELECTRON_SKIP_BINARY_DOWNLOAD=1
 # manifest first so Docker can cache this layer when package.json hasn't
 # changed between deploys.
 COPY package.json package-lock.json ./
-RUN npm ci --ignore-scripts
+# --legacy-peer-deps: the legacy Storyboarder deps have a real peer
+# conflict (react-dom@16.8.6 vs react-three-fiber@4.0.12 which wants
+# react-dom>=16.12). The lockfile encodes a working tree; newer npm is
+# just refusing to trust it. This flag tells npm to stop second-guessing.
+RUN npm ci --ignore-scripts --legacy-peer-deps
 
 # Copy the source tree and the web webpack config. We deliberately
 # don't copy configs/xr, configs/shot-generator etc. — only the web
