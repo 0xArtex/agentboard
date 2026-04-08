@@ -61,13 +61,62 @@ Use this when you (or the runtime you're in) can already generate images and aud
    context at all. Same for upload_audio with audioPath/audioUrl.
 
    Server-side upload validation:
-     - Image cap: 10 MB, audio cap: 20 MB (413 UPLOAD_TOO_LARGE)
+     - Image cap: 256 MB, audio cap: 512 MB (413 UPLOAD_TOO_LARGE).
+       Caps are generous on purpose — 4K HDR PNGs, layered art, and
+       high-res photos all fit. You should rarely hit them.
      - Magic-byte mime sniffing: you can't spoof the Content-Type.
        If you declare image/png but pass JPEG bytes, the server stores
        it as image/jpeg (the real type wins).
      - Accepted image mimes: image/png, image/jpeg, image/gif, image/webp
      - Accepted audio mimes: audio/mpeg, audio/wav, audio/ogg
      - Other formats → 400 BAD_MIME
+
+   **PREFER BATCH UPLOADS** for any storyboard with 3+ panels — see
+   the next section. One batch call replaces N round-trips.
+
+### Batch upload — populate many boards in a single call
+
+```
+POST /api/agent/upload-batch
+{ "projectId": "...",
+  "uploads": [
+    { "boardUid": "ABC", "kind": "image", "imageBase64": "...", "mime": "image/png" },
+    { "boardUid": "DEF", "kind": "image", "imageBase64": "...", "mime": "image/png" },
+    { "boardUid": "ABC", "kind": "audio", "audioKind": "narration", "audioBase64": "...", "mime": "audio/mpeg" },
+    ...
+  ]
+}
+```
+
+- **Up to 100 items per call**, mixing images and audio freely.
+- Each item is processed independently — partial failures don't abort
+  the batch.
+- Response is `201` if every item succeeded, `207 Multi-Status`
+  otherwise. Body: `{ succeeded: [...], failed: [...] }` with
+  per-item details and `index` field so you can map back to your input.
+
+MCP equivalent: `upload_assets_batch` accepts the same shape, and
+each item can use `imagePath`/`imageUrl`/`audioPath`/`audioUrl`
+instead of inline base64. **This is the recommended path for any
+storyboard with 3+ panels** — way fewer round-trips and zero context
+cost when using `imagePath`.
+
+Example MCP call to populate a 5-panel storyboard from local files in
+one call:
+```json
+{
+  "projectId": "...",
+  "uploads": [
+    { "boardUid": "ABC", "kind": "image", "imagePath": "/tmp/panel1.png" },
+    { "boardUid": "DEF", "kind": "image", "imagePath": "/tmp/panel2.png" },
+    { "boardUid": "GHI", "kind": "image", "imagePath": "/tmp/panel3.png" },
+    { "boardUid": "JKL", "kind": "image", "imagePath": "/tmp/panel4.png" },
+    { "boardUid": "MNO", "kind": "image", "imagePath": "/tmp/panel5.png" }
+  ]
+}
+```
+That's **one tool call** populating 5 boards. Compare to 5 separate
+`upload_image` calls.
 
 3. (optional) Annotate on top of the uploaded image:
    POST /api/agent/draw-shapes

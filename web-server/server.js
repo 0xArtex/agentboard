@@ -47,10 +47,14 @@ app.locals.socketHandler = socketHandler;
 // ── Middleware ──
 app.use(cors());
 app.use(morgan('dev'));
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+// Body parser limits — sized to allow batch uploads of high-res storyboard
+// images (256MB cap per image × base64 1.33x overhead × ~1 image safety
+// margin = ~400MB ceiling). Caps are enforced per-upload by enforceUploadLimits
+// in routes/agent.js, so this limit only protects the parser from total nonsense.
+app.use(express.json({ limit: '400mb' }));
+app.use(express.urlencoded({ extended: true, limit: '400mb' }));
 // Raw body parser for binary file writes
-app.use('/api/fs/write', express.raw({ type: '*/*', limit: '50mb' }));
+app.use('/api/fs/write', express.raw({ type: '*/*', limit: '400mb' }));
 
 // Agent identity: stamp req.agent on every /api/* request.
 // In dev (AGENT_AUTH_ENABLED=0) anonymous access is attributed to the

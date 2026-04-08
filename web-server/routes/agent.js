@@ -76,11 +76,14 @@ function decodeBase64(input, fieldName) {
 
 // ── upload hardening: size caps + magic-byte mime sniff ───────────────
 //
-// Per-upload byte caps. These are separate from the 50 MB express.json
-// body limit — the body limit protects the parser, these protect the
-// actual blob store. Prevents loop-uploads from filling disk/R2.
-const MAX_IMAGE_BYTES = 10 * 1024 * 1024;   // 10 MB
-const MAX_AUDIO_BYTES = 20 * 1024 * 1024;   // 20 MB
+// Per-upload byte caps. Generous enough that no realistic storyboard
+// image hits them (4K HDR PNGs, layered PSDs, high-res scans, etc.) but
+// still bounded to prevent a single bad request from OOMing the server.
+// Anything legitimately bigger than this should use multipart/streaming
+// uploads in a future iteration. The express.json body limit in
+// server.js is sized to fit base64 inflation of these caps + headroom.
+const MAX_IMAGE_BYTES = 256 * 1024 * 1024;   // 256 MB
+const MAX_AUDIO_BYTES = 512 * 1024 * 1024;   // 512 MB
 
 // Check the first few bytes of a buffer against known image/audio
 // signatures. Returns the detected mime type, or null if unrecognized.
@@ -816,6 +819,145 @@ router.post('/upload-audio', requireProjectAccess('write'), asyncHandler(async (
     return res.status(status).json({ error: { code: err.code, message: err.message } });
   }
 }));
+
+// ── batch upload ──────────────────────────────────────────────────────
+//
+// POST /api/agent/upload-batch
+// Body: {
+//   projectId: string,
+//   uploads: [
+//     // image item
+//     { boardUid, layer?, imageBase64, mime?, kind: 'image' },
+//     // audio item
+//     { boardUid, audioKind?, audioBase64, mime?, duration?, voice?, kind: 'audio' },
+//     ...
+//   ]
+// }
+//
+// Populates many assets across many boards in a single request. Each
+// item is validated, sniff-checked, and stored independently. Partial
+// failures are reported per-item; the whole request never aborts on a
+// single bad upload.
+//
+// Response 207 Multi-Status (or 201 if every item succeeded):
+//   {
+//     succeeded: [{ index, boardUid, kind, hash, size, mime }],
+//     failed:    [{ index, boardUid, error: { code, message } }]
+//   }
+//
+// Each item supports the SAME imageBase64/audioBase64 input as the
+// single-upload routes. The MCP layer's upload_assets_batch tool also
+// resolves imagePath/imageUrl/audioPath/audioUrl into base64 server-side
+// before posting here.
+const MAX_BATCH_ITEMS = 100;
+router.post('/upload-batch',
+  frequencyLimiter({ windowMs: 60_000, max: 30 }),
+  requireProjectAccess('write'),
+  asyncHandler(async (req, res) => {
+    const body = req.body || {};
+    const uploads = Array.isArray(body.uploads) ? body.uploads : null;
+    if (!uploads || uploads.length === 0) {
+      return res.status(400).json({
+        error: { code: 'BAD_REQUEST', message: 'uploads must be a non-empty array' },
+      });
+    }
+    if (uploads.length > MAX_BATCH_ITEMS) {
+      return res.status(400).json({
+        error: { code: 'BAD_REQUEST', message: `uploads array exceeds max ${MAX_BATCH_ITEMS} items per request` },
+      });
+    }
+
+    const succeeded = [];
+    const failed = [];
+
+    for (let i = 0; i < uploads.length; i++) {
+      const item = uploads[i] || {};
+      const itemKind = item.kind === 'audio' ? 'audio' : 'image';
+      const boardUid = item.boardUid;
+
+      if (!boardUid) {
+        failed.push({ index: i, boardUid: null, error: { code: 'BAD_REQUEST', message: 'boardUid required' } });
+        continue;
+      }
+
+      // Pre-resolution failures from the MCP batch tool come through as
+      // items with `_resolutionError` set — surface those as-is rather
+      // than re-rejecting them with a generic BAD_REQUEST.
+      if (item._resolutionError) {
+        failed.push({
+          index: i,
+          boardUid,
+          error: { code: 'RESOLUTION_FAILED', message: String(item._resolutionError) },
+        });
+        continue;
+      }
+
+      try {
+        let bytes;
+        let trustedMime;
+        let storeKind;
+        let storeMeta = null;
+
+        if (itemKind === 'image') {
+          if (!item.imageBase64) throw Object.assign(new Error('imageBase64 required for image item'), { code: 'BAD_REQUEST' });
+          bytes = decodeBase64(item.imageBase64, `uploads[${i}].imageBase64`);
+          trustedMime = enforceUploadLimits(bytes, {
+            maxBytes: MAX_IMAGE_BYTES,
+            kind: 'image',
+            allowedMimes: ['image/png', 'image/jpeg', 'image/gif', 'image/webp'],
+            declaredMime: item.mime,
+          });
+          const layer = item.layer || 'fill';
+          storeKind = 'layer:' + layer;
+        } else {
+          if (!item.audioBase64) throw Object.assign(new Error('audioBase64 required for audio item'), { code: 'BAD_REQUEST' });
+          bytes = decodeBase64(item.audioBase64, `uploads[${i}].audioBase64`);
+          trustedMime = enforceUploadLimits(bytes, {
+            maxBytes: MAX_AUDIO_BYTES,
+            kind: 'audio',
+            allowedMimes: ['audio/mpeg', 'audio/wav', 'audio/ogg'],
+            declaredMime: item.mime,
+          });
+          const subkind = (item.audioKind || 'narration').replace(/[^a-z]/g, '');
+          storeKind = 'audio:' + subkind;
+          storeMeta = {};
+          if (item.duration != null) storeMeta.duration = item.duration;
+          if (item.voice) storeMeta.voice = item.voice;
+        }
+
+        const result = await store.storeBoardAsset(
+          req.projectId, boardUid, storeKind, bytes, trustedMime,
+          storeMeta && Object.keys(storeMeta).length ? storeMeta : null
+        );
+
+        broadcast(req, 'asset:update', {
+          projectId: req.projectId, boardUid, kind: result.kind, hash: result.hash,
+        });
+
+        succeeded.push({
+          index: i,
+          boardUid,
+          kind: result.kind,
+          hash: result.hash,
+          size: result.size,
+          mime: trustedMime,
+        });
+      } catch (err) {
+        failed.push({
+          index: i,
+          boardUid,
+          error: {
+            code: err.code || 'INTERNAL',
+            message: err.message,
+          },
+        });
+      }
+    }
+
+    const status = failed.length === 0 ? 201 : 207;
+    res.status(status).json({ succeeded, failed });
+  })
+);
 
 // ── AI image generation ────────────────────────────────────────────────
 //

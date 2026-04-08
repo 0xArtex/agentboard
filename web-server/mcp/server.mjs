@@ -34,8 +34,9 @@
  *   - add_board               append a board to a project
  *   - add_scene               batch-add boards (a "scene")
  *   - set_metadata            batch update dialogue/action/notes/duration
- *   - upload_image            upload a base64 PNG to a layer
- *   - upload_audio            upload base64 audio with kind (narration/sfx/...)
+ *   - upload_image            upload an image (path/url/base64) to a layer
+ *   - upload_audio            upload audio (path/url/base64) with kind
+ *   - upload_assets_batch     PREFERRED: many uploads in one call
  *   - generate_panel          AI image generation (fal.ai, x402-gated)
  *   - list_image_styles       list available named visual style presets
  *   - list_voices             list available TTS voices on the user's account
@@ -147,8 +148,12 @@ function errorText(err) {
 // hard size + time limits. This is best-effort — the primary use case is
 // agents fetching their own fal CDN URLs, not internal network probes.
 
-const MAX_FETCH_BYTES = 25 * 1024 * 1024;    // 25 MB hard cap on remote/local reads
-const FETCH_TIMEOUT_MS = 30_000;
+// 256 MB matches the REST-side image cap in routes/agent.js so the
+// MCP-fetched bytes can always make it through the upload route.
+const MAX_FETCH_BYTES = 256 * 1024 * 1024;
+// Generous timeout so high-latency CDN downloads of huge images don't
+// abort prematurely.
+const FETCH_TIMEOUT_MS = 120_000;
 
 function isPrivateHost(hostname) {
   if (!hostname) return true;
@@ -467,6 +472,105 @@ server.registerTool(
       imageBase64: base64,
       mime: mime || detectedMime || 'image/png',
     });
+    return okText(result);
+  })
+);
+
+// ── tool: upload_assets_batch ──────────────────────────────────────────
+server.registerTool(
+  'upload_assets_batch',
+  {
+    title: 'Upload many images and/or audio clips in one call',
+    description:
+      'BATCH upload — populate multiple boards in a single tool call. Massively ' +
+      'reduces round-trips when an agent has 5/10/50 panels to fill. Each item ' +
+      'in the `uploads` array is an independent upload spec; partial failures are ' +
+      'reported per-item via the `failed` array, the whole call never aborts on ' +
+      'one bad item. Each item can use imagePath/imageUrl/imageBase64 for images ' +
+      'or audioPath/audioUrl/audioBase64 for audio — same context-cost rules as ' +
+      'single uploads (path > url > base64). Up to 100 items per call. Use this ' +
+      'as the DEFAULT path for any storyboard with 3+ panels.',
+    inputSchema: {
+      projectId: z.string(),
+      uploads: z.array(z.object({
+        boardUid: z.string(),
+        kind: z.enum(['image', 'audio']).optional().describe('Item type (default "image")'),
+        // image fields
+        layer: z.string().optional().describe('Image layer (default "fill")'),
+        imagePath: z.string().optional().describe('Local file path the MCP subprocess reads (preferred for any non-tiny image)'),
+        imageUrl: z.string().optional().describe('Remote URL the MCP subprocess fetches'),
+        imageBase64: z.string().optional().describe('Inline base64. Only for very small images.'),
+        // audio fields
+        audioKind: z.string().optional().describe('Audio sub-kind: narration | sfx | music | ambient | reference (default narration)'),
+        audioPath: z.string().optional().describe('Local file path for audio'),
+        audioUrl: z.string().optional().describe('Remote audio URL'),
+        audioBase64: z.string().optional().describe('Inline base64 audio'),
+        // common
+        mime: z.string().optional().describe('Override mime type. Server still verifies via magic bytes.'),
+        duration: z.coerce.number().optional().describe('Audio duration in ms (metadata only)'),
+        voice: z.string().optional(),
+      })).describe('Array of upload specs, processed independently. Up to 100 per call.'),
+    },
+  },
+  handle(async (args) => {
+    const { projectId, uploads } = args;
+    if (!Array.isArray(uploads) || uploads.length === 0) {
+      throw new Error('uploads must be a non-empty array');
+    }
+    // Resolve each item's bytes before posting to the REST batch endpoint.
+    // We do this in series so we don't blow memory holding 100 huge files
+    // at once — most agents will batch 5-20 items, which is fine.
+    const resolved = [];
+    for (let i = 0; i < uploads.length; i++) {
+      const u = uploads[i];
+      const itemKind = u.kind === 'audio' ? 'audio' : 'image';
+      try {
+        if (itemKind === 'image') {
+          const { base64, mime } = await loadBytesForTool({
+            base64: u.imageBase64,
+            path: u.imagePath,
+            url: u.imageUrl,
+            defaultMime: u.mime || null,
+          });
+          resolved.push({
+            kind: 'image',
+            boardUid: u.boardUid,
+            layer: u.layer || 'fill',
+            imageBase64: base64,
+            mime: u.mime || mime || 'image/png',
+          });
+        } else {
+          const { base64, mime } = await loadBytesForTool({
+            base64: u.audioBase64,
+            path: u.audioPath,
+            url: u.audioUrl,
+            defaultMime: u.mime || null,
+          });
+          resolved.push({
+            kind: 'audio',
+            boardUid: u.boardUid,
+            audioKind: u.audioKind || 'narration',
+            audioBase64: base64,
+            mime: u.mime || mime || 'audio/mpeg',
+            duration: u.duration,
+            voice: u.voice,
+          });
+        }
+      } catch (e) {
+        // Resolution failed (bad path, bad URL, missing bytes). Pass a
+        // sentinel item that the REST endpoint will surface as a per-item
+        // failure rather than aborting the whole batch.
+        resolved.push({
+          kind: itemKind,
+          boardUid: u.boardUid,
+          // Intentionally missing imageBase64/audioBase64 → REST will
+          // record this as a per-item BAD_REQUEST failure with the
+          // resolution error message in the response.
+          _resolutionError: e.message,
+        });
+      }
+    }
+    const result = await apiRequest('POST', '/api/agent/upload-batch', { projectId, uploads: resolved });
     return okText(result);
   })
 );
