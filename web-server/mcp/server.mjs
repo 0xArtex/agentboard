@@ -313,9 +313,12 @@ server.registerTool(
   {
     title: 'Upload an image to a board layer',
     description:
-      'Upload a base64-encoded PNG/JPG to a specific layer of a board. ' +
-      'Use this when you already have image bytes; use generate_panel to have ' +
-      "the server generate new art via AI. Layers: 'fill', 'reference', 'ink', 'notes'.",
+      'PREFERRED image path. Upload a base64-encoded PNG/JPG to a specific layer ' +
+      'of a board. If your runtime has built-in image generation (fal, Sora, Veo, ' +
+      'Midjourney, Gemini, etc.), generate the image with your own tool and upload ' +
+      'it here — cheaper, faster, and you control the model. Only fall back to ' +
+      'generate_panel if you have NO image generation of your own. Layers: ' +
+      "'fill' (most common), 'reference', 'ink', 'notes', 'pencil', 'tone'.",
     inputSchema: {
       projectId: z.string(),
       boardUid: z.string(),
@@ -336,8 +339,12 @@ server.registerTool(
   {
     title: 'Upload audio to a board',
     description:
-      "Attach an audio file to a board. Use kind to distinguish narration, sfx, music, ambient, or reference. " +
-      "Accepts base64-encoded mp3/wav/ogg bytes. Use generate_speech for server-side TTS.",
+      'PREFERRED audio path. Attach an audio file to a board. If your runtime has ' +
+      'built-in TTS or audio generation, produce the audio with your own tool and ' +
+      'upload it here. Only fall back to generate_speech/generate_sound_effect/' +
+      'generate_music if you have NO audio generation of your own. Use kind to ' +
+      'distinguish narration, sfx, music, ambient, or reference. Accepts ' +
+      'base64-encoded mp3/wav/ogg bytes.',
     inputSchema: {
       projectId: z.string(),
       boardUid: z.string(),
@@ -358,17 +365,15 @@ server.registerTool(
 server.registerTool(
   'generate_panel',
   {
-    title: 'Generate a panel image with AI',
+    title: 'Generate a panel image with AI (fallback)',
     description:
-      'Generate an image for a board layer using AI (fal.ai). The server calls the ' +
-      'image-gen provider, downloads the result, and stores it as the specified layer. ' +
-      'Use the optional `style` parameter to pick a named aesthetic preset — ' +
-      '"storyboard-sketch" produces classic black-and-white rough marker sketches ' +
-      'with reference-image guidance (the preferred style for pre-production panels); ' +
-      '"cinematic-color" produces painterly color concept art; "comic-panel" produces ' +
-      'inked + cel-shaded comic-book style. Call list_image_styles to discover all ' +
-      'available presets. This route is x402-gated in production: the MCP client must ' +
-      'supply the X-Payment header via the AGENTBOARD_X402_PAYMENT env var.',
+      'FALLBACK tool. Only use this if your runtime does NOT have its own image ' +
+      'generation (fal, Sora, Veo, Midjourney, Gemini, etc.). If you already have ' +
+      'an image generator, use upload_image instead — it\'s cheaper, faster, and ' +
+      'avoids server-side API key dependencies. This tool calls fal.ai on the ' +
+      'server\'s behalf, which requires FAL_KEY to be configured and is x402-gated ' +
+      'in production. Style presets: "storyboard-sketch" (B&W sketches w/ refs), ' +
+      '"cinematic-color", "comic-panel". Call list_image_styles to discover all.',
     inputSchema: {
       projectId: z.string(),
       boardUid: z.string(),
@@ -445,13 +450,14 @@ server.registerTool(
 server.registerTool(
   'generate_speech',
   {
-    title: 'Generate speech audio with AI',
+    title: 'Generate speech audio with AI (fallback)',
     description:
-      'Generate text-to-speech audio for a board using ElevenLabs. The server calls ' +
-      'the TTS provider, downloads the audio, and stores it as an audio:<kind> asset on ' +
-      'the target board. Use this for narration and dialogue. For non-speech audio ' +
-      'use generate_sound_effect (one-shot SFX) or generate_music (musical pieces). ' +
-      'x402-gated in production.',
+      'FALLBACK tool. Only use this if your runtime does NOT have its own TTS. If ' +
+      'you already have a TTS tool, use upload_audio with kind:"narration" instead — ' +
+      'cheaper, avoids server-side API key dependencies, avoids ElevenLabs free-tier ' +
+      'voice restrictions. This tool calls ElevenLabs on the server\'s behalf, requires ' +
+      'ELEVENLABS_KEY, and is x402-gated in production. For non-speech audio use ' +
+      'generate_sound_effect or generate_music (also fallback tools).',
     inputSchema: {
       projectId: z.string(),
       boardUid: z.string(),
@@ -473,14 +479,13 @@ server.registerTool(
 server.registerTool(
   'generate_sound_effect',
   {
-    title: 'Generate a sound effect with AI',
+    title: 'Generate a sound effect with AI (fallback)',
     description:
-      'Generate a one-shot sound effect for a board using ElevenLabs sound generation. ' +
-      'Best for short prompts describing a discrete sound: "thunderclap", "footsteps on ' +
-      'gravel", "metal door slam", "car engine starting". Stored as audio:sfx by default ' +
-      '(or audio:ambient if kind=ambient). Duration is bounded 0.5-22 seconds. x402-gated ' +
-      'in production. For dialogue/narration use generate_speech, for musical pieces use ' +
-      'generate_music.',
+      'FALLBACK tool. Only use this if your runtime does NOT have its own audio ' +
+      'generation. If you can produce SFX yourself, use upload_audio with kind:"sfx" ' +
+      'instead. This tool calls ElevenLabs sound-generation, requires ELEVENLABS_KEY, ' +
+      'and is x402-gated. Best for short prompts: "thunderclap", "footsteps on gravel", ' +
+      '"metal door slam". Duration 0.5-22 seconds.',
     inputSchema: {
       projectId: z.string(),
       boardUid: z.string(),
@@ -500,14 +505,14 @@ server.registerTool(
 server.registerTool(
   'generate_music',
   {
-    title: 'Generate music with AI',
+    title: 'Generate music with AI (fallback)',
     description:
-      'Compose a piece of music for a board using ElevenLabs /v1/music. Best for ' +
-      'descriptive prompts like "melancholic lo-fi piano with soft kick drum, 70 bpm" ' +
-      'or "epic orchestral cue, building tension, strings and timpani". Stored as ' +
-      'audio:music by default (or audio:ambient if kind=ambient). Length is bounded ' +
-      '3-600 seconds (3000-600000ms). Pass forceInstrumental=true if vocals are not ' +
-      'wanted. x402-gated in production.',
+      'FALLBACK tool. Only use this if your runtime does NOT have its own music ' +
+      'generation. If you can produce music yourself, use upload_audio with ' +
+      'kind:"music" instead. This tool calls ElevenLabs /v1/music, requires ' +
+      'ELEVENLABS_KEY, and is x402-gated. Best for descriptive prompts: ' +
+      '"melancholic lo-fi piano, 70 bpm". Length 3-600 seconds. Pass ' +
+      'forceInstrumental:true to guarantee no vocals.',
     inputSchema: {
       projectId: z.string(),
       boardUid: z.string(),
